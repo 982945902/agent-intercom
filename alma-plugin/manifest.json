@@ -1,0 +1,11 @@
+{
+  "id": "intercom-bridge",
+  "name": "Agent Intercom",
+  "version": "1.0.0",
+  "description": "Connect the current Alma conversation to local OMP and Codex peers through the existing Intercom broker.",
+  "author": "Agent Intercom contributors",
+  "main": "main.mjs",
+  "engines": { "alma": ">=0.4.567" },
+  "type": "integration",
+  "permissions": ["tools:register"]
+}

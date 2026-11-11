@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+.env
+.env.*
+*.log
+coverage/
+bridge-root.json
+.agent-intercom-install.json
+*.backup
+*.backup.*

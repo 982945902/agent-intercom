@@ -1,0 +1,9 @@
+# Reference only: the installer writes absolute paths for your installation.
+# Replace both example paths before using this snippet manually.
+# No approval_policy, sandbox_mode, or tool approval settings are changed.
+[mcp_servers.intercom]
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/agent-intercom/server.mjs"]
+enabled = true
+tool_timeout_sec = 660
+env_vars = ["CODEX_HOME", "CODEX_INTERCOM_SOCKET", "PI_CODING_AGENT_DIR", "PI_INTERCOM_SCOPE_ID", "INTERCOM_PACKAGE"]

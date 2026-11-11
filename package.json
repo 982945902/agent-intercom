@@ -1,0 +1,21 @@
+{
+  "name": "agent-intercom",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Same-machine communication between existing OMP, Codex and Alma conversations using pi-intercom.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "repository": { "type": "git", "url": "https://github.com/982945902/agent-intercom.git" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test bridge.test.mjs scripts/*.test.mjs",
+    "setup": "node scripts/install.mjs",
+    "uninstall:clients": "node scripts/uninstall.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "pi-intercom": "0.18.1",
+    "ws": "8.22.2"
+  }
+}
