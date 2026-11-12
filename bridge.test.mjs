@@ -84,7 +84,7 @@ await test('isolated broker: identity, reply correlation, cancellation, and dupl
     assert.equal(message.content.text, 'one correlated answer');
   });
 
-  await t.test('AGY bridge verifies host context, rejects subagents, and delivers via SendAgentMessage', async () => {
+  await t.test('AGY bridge verifies host context, rejects subagents, and delivers via SendUserCascadeMessage', async () => {
     const { AgyBridge, AgyConnection, agyContextFromEnv, startAgyDaemon, callAgyDaemon } = await import('./agy.mjs');
     const rootId = randomUUID();
     const subagentId = randomUUID();
@@ -121,7 +121,7 @@ await test('isolated broker: identity, reply correlation, cancellation, and dupl
         }
         return;
       }
-      if (req.url === '/exa.language_server_pb.LanguageServerService/SendAgentMessage') {
+      if (req.url === '/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage') {
         sentMessages.push(body);
         res.end(JSON.stringify({}));
         return;
@@ -170,8 +170,9 @@ await test('isolated broker: identity, reply correlation, cancellation, and dupl
       const entry = bridge.endpoints.get(rootId);
       await entry.endpoint.inbound;
       assert.equal(sentMessages.length, 1);
-      assert.equal(sentMessages[0].recipient, rootId);
-      assert.match(sentMessages[0].content, /hello agy/);
+      assert.equal(sentMessages[0].cascadeId, rootId);
+      assert.equal(sentMessages[0].clientMessageId, msgId);
+      assert.match(sentMessages[0].items?.[0]?.text ?? '', /hello agy/);
 
       const pending = await callAgyDaemon('intercom_pending', {}, env, socketPath);
       assert.equal(pending.length, 1);
