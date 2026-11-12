@@ -83,6 +83,110 @@ await test('isolated broker: identity, reply correlation, cancellation, and dupl
     assert.equal(message.replyTo, id);
     assert.equal(message.content.text, 'one correlated answer');
   });
+
+  await t.test('AGY bridge verifies host context, rejects subagents, and delivers via SendAgentMessage', async () => {
+    const { AgyBridge, AgyConnection, agyContextFromEnv, startAgyDaemon, callAgyDaemon } = await import('./agy.mjs');
+    const rootId = randomUUID();
+    const subagentId = randomUUID();
+    const sentMessages = [];
+    const server = createServer(async (req, res) => {
+      if (req.headers['x-codeium-csrf-token'] !== 'secret-csrf') {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ message: 'invalid csrf' }));
+        return;
+      }
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/exa.language_server_pb.LanguageServerService/GetConversationMetadata') {
+        if (body.conversationId === rootId) {
+          res.end(JSON.stringify({
+            metadata: {
+              rootConversationId: rootId,
+              workspaceUris: [`file://${runtime}`],
+            },
+          }));
+        } else if (body.conversationId === subagentId) {
+          res.end(JSON.stringify({
+            metadata: {
+              rootConversationId: rootId,
+              parentConversationId: rootId,
+              workspaceUris: [`file://${runtime}`],
+            },
+          }));
+        } else {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ code: 'not_found', message: 'trajectory not found' }));
+        }
+        return;
+      }
+      if (req.url === '/exa.language_server_pb.LanguageServerService/SendAgentMessage') {
+        sentMessages.push(body);
+        res.end(JSON.stringify({}));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const lsAddress = `127.0.0.1:${server.address().port}`;
+    const socketPath = join(runtime, 'intercom/agy-test.sock');
+    const bridge = new AgyBridge(new AgyConnection());
+    const daemon = await startAgyDaemon(socketPath, bridge, 0);
+    try {
+      assert.throws(() => agyContextFromEnv({}), /ANTIGRAVITY_CONVERSATION_ID/);
+      assert.throws(() => agyContextFromEnv({
+        ANTIGRAVITY_CONVERSATION_ID: rootId,
+        ANTIGRAVITY_SOURCE_METADATA: JSON.stringify({ tool: { conversationId: subagentId } }),
+        ANTIGRAVITY_LS_ADDRESS: lsAddress,
+        ANTIGRAVITY_CSRF_TOKEN: 'secret-csrf',
+      }), /does not match/);
+
+      await assert.rejects(
+        callAgyDaemon('intercom_join', { name: 'subagent' }, {
+          ANTIGRAVITY_CONVERSATION_ID: subagentId,
+          ANTIGRAVITY_LS_ADDRESS: lsAddress,
+          ANTIGRAVITY_CSRF_TOKEN: 'secret-csrf',
+        }, socketPath),
+        /Subagent conversations cannot join Intercom/,
+      );
+
+      const env = {
+        ANTIGRAVITY_CONVERSATION_ID: rootId,
+        ANTIGRAVITY_SOURCE_METADATA: JSON.stringify({ tool: { conversationId: rootId } }),
+        ANTIGRAVITY_LS_ADDRESS: lsAddress,
+        ANTIGRAVITY_CSRF_TOKEN: 'secret-csrf',
+      };
+      const joined = await callAgyDaemon('intercom_join', { name: 'agy-test' }, env, socketPath);
+      assert.equal(joined.connected, true);
+      assert.equal(joined.identity.id, rootId);
+      assert.equal(joined.identity.name, 'agy-test');
+      assert.equal(joined.identity.model, 'AGY');
+
+      const msgId = randomUUID();
+      const delivery = await a.send(rootId, { text: 'hello agy', messageId: msgId, expectsReply: true });
+      assert.equal(delivery.delivered, true);
+      const entry = bridge.endpoints.get(rootId);
+      await entry.endpoint.inbound;
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0].recipient, rootId);
+      assert.match(sentMessages[0].content, /hello agy/);
+
+      const pending = await callAgyDaemon('intercom_pending', {}, env, socketPath);
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0].id, msgId);
+
+      const replyReceived = once(a, 'message');
+      await callAgyDaemon('intercom_reply', { reply_to: msgId, message: 'agy reply' }, env, socketPath);
+      const [, replyMsg] = await replyReceived;
+      assert.equal(replyMsg.replyTo, msgId);
+      assert.equal(replyMsg.content.text, 'agy reply');
+    } finally {
+      await daemon?.close();
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
 });
 
 await test('Alma admission requires the persisted user message in the correct thread', async t => {
