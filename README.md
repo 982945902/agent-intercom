@@ -1,6 +1,6 @@
 # Agent Intercom
 
-Connect existing OMP, Codex and Alma conversations on the **same machine**, using the original `pi-intercom` broker. Messages stay in the original native threads; the bridge does not spawn a model process or create a replacement conversation for each message.
+Connect existing OMP, Codex, Alma and Antigravity (`agy`) conversations on the **same machine**, using the original `pi-intercom` broker. Messages stay in the original native threads; the bridge does not spawn a model process or create a replacement conversation for each message.
 
 ```mermaid
 flowchart LR
@@ -9,9 +9,11 @@ flowchart LR
   MCP <--> Broker
   Alma["Alma original thread"] <--> Native["Native plugin"]
   Native <--> Broker
+  AGY["AGY original conversation"] <--> AgyDaemon["AGY local bridge"]
+  AgyDaemon <--> Broker
 ```
 
-The OMP plugin and broker protocol are unchanged. Codex identity comes from host-supplied `_meta.threadId`, with delivery through `thread/queue/add`. Alma identity comes from its native host context, with delivery through `steer_generation` using `source: "intercom"`.
+The OMP plugin and broker protocol are unchanged. Codex identity comes from host-supplied `_meta.threadId`, with delivery through `thread/queue/add`. Alma identity comes from its native host context, with delivery through `steer_generation` using `source: "intercom"`. AGY identity comes from the host-injected `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_SOURCE_METADATA`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_CSRF_TOKEN`, verified via `LanguageServerService/GetConversationMetadata` and delivered through `LanguageServerService/SendAgentMessage`.
 
 ## Prerequisites and compatibility
 
@@ -19,6 +21,7 @@ The OMP plugin and broker protocol are unchanged. Codex identity comes from host
 - For OMP peers, an existing OMP installation with its original `pi-intercom` plugin enabled. This installer does not install or modify OMP.
 - For Codex, a live conversation loaded in the reachable **local shared daemon**. Standalone `codex exec`, `--no-daemon`, remote/desktop threads on another server, and saved transcripts are not supported peers.
 - For Alma, the native application and its local service running. Alma is installed as a native plugin, **not** another MCP server entry.
+- For AGY (`Antigravity`), a live local CLI or IDE conversation backed by its local Language Server (`ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`). Subagent conversations fail closed.
 
 The existing bridge was exercised on **macOS** with OMP **18.18.8**, Codex CLI **0.167.0** / daemon **0.167.1**, Alma **0.4.567**, and `pi-intercom` **0.18.1**. Linux and Windows are unsupported; other application versions are unverified.
 
@@ -33,11 +36,12 @@ npm ci --ignore-scripts
 node scripts/install.mjs all
 ```
 
-Select `codex`, `alma`, or `all` (the default):
+Select `codex`, `alma`, `agy`, or `all` (the default):
 
 ```sh
 node scripts/install.mjs codex
 node scripts/install.mjs alma
+node scripts/install.mjs agy
 ```
 
 Default locations:
@@ -47,6 +51,7 @@ Default locations:
 | Shared runtime | `~/.local/lib/agent-intercom` |
 | Codex MCP configuration | `${CODEX_HOME:-$HOME/.codex}/config.toml` |
 | Alma native plugin | `${XDG_CONFIG_HOME:-$HOME/.config}/alma/plugins/intercom-bridge` |
+| AGY plugin & skill | `${GEMINI_CONFIG_DIR:-$HOME/.gemini/config}/plugins/intercom-bridge` |
 
 For a custom runtime location, pass an absolute path:
 
@@ -85,6 +90,10 @@ In a Codex conversation, ask the model:
 In Alma:
 
 > Use ToolSearch to find intercom. Call plugin--intercom-bridge--intercom_join with name alma-a to join this conversation.
+
+In AGY (`Antigravity`):
+
+> Join Intercom as agy-a and list peers. (Or run `node ~/.local/lib/agent-intercom/agy.mjs intercom_join '{"name":"agy-a"}'`)
 
 Alma prefixes all seven tool names with `plugin--intercom-bridge--`. OMP alone retains `/alias <name>`; Codex and Alma use `intercom_join({name:"..."})`. There is no shell alias or second alias registry. Names are convenient labels; native thread IDs remain stable routing identities.
 

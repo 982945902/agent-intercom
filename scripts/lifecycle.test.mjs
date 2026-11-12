@@ -75,15 +75,18 @@ function fixture(t) {
   fs.mkdirSync(home);
   fs.mkdirSync(path.join(source, 'scripts'), { recursive: true });
   fs.mkdirSync(path.join(source, 'alma-plugin'));
+  fs.mkdirSync(path.join(source, 'agy-plugin', 'skills', 'intercom'), { recursive: true });
   for (const name of ['lifecycle.mjs', 'install.mjs', 'uninstall.mjs']) fs.copyFileSync(path.join(SOURCE, 'scripts', name), path.join(source, 'scripts', name));
   for (const name of RUNTIME_FILES.filter((name) => name.endsWith('.mjs'))) fs.copyFileSync(path.join(SOURCE, name), path.join(source, name));
   for (const name of ['manifest.json', 'main.mjs']) fs.copyFileSync(path.join(SOURCE, 'alma-plugin', name), path.join(source, 'alma-plugin', name));
+  fs.copyFileSync(path.join(SOURCE, 'agy-plugin', 'plugin.json'), path.join(source, 'agy-plugin', 'plugin.json'));
+  fs.copyFileSync(path.join(SOURCE, 'agy-plugin', 'skills', 'intercom', 'SKILL.md'), path.join(source, 'agy-plugin', 'skills', 'intercom', 'SKILL.md'));
   // A dependency-free package exercises real npm ci offline; a lifecycle hook
   // must not execute. These tests concern ownership, not the runtime protocol.
   const manifest = { name: 'installer-fixture', version: '1.0.0', private: true, scripts: { preinstall: 'node -e "require(\'node:fs\').writeFileSync(\'hook-ran\', \'unexpected\')"' } };
   fs.writeFileSync(path.join(source, 'package.json'), JSON.stringify(manifest));
   fs.writeFileSync(path.join(source, 'package-lock.json'), JSON.stringify({ name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true, packages: { '': { name: manifest.name, version: manifest.version, hasInstallScript: true } } }));
-  const env = { ...process.env, HOME: home, CODEX_HOME: path.join(home, '.codex'), XDG_CONFIG_HOME: path.join(home, '.config'), npm_config_cache: path.join(base, 'npm-cache'), npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false', npm_config_offline: 'true', npm_config_userconfig: path.join(base, 'empty-npmrc') };
+  const env = { ...process.env, HOME: home, CODEX_HOME: path.join(home, '.codex'), XDG_CONFIG_HOME: path.join(home, '.config'), GEMINI_CONFIG_DIR: path.join(home, '.gemini/config'), npm_config_cache: path.join(base, 'npm-cache'), npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false', npm_config_offline: 'true', npm_config_userconfig: path.join(base, 'empty-npmrc') };
   fs.writeFileSync(env.npm_config_userconfig, '');
   const opts = options([], env, home);
   function run(command, args = [], success = true) {
@@ -103,15 +106,21 @@ test('First install, repeated update and partial/final uninstall use only owned 
   run('install');
   assert.equal(fs.statSync(path.join(opts.root, MARKER)).mode & 0o777, 0o600);
   assert.ok(!fs.existsSync(path.join(opts.root, 'hook-ran')));
+  assert.ok(fs.readFileSync(path.join(opts.agy, 'skills/intercom/SKILL.md'), 'utf8').includes(opts.root));
   fs.appendFileSync(opts.codex, '\n[projects."/new"]\ntrust_level = "untrusted"\n');
   run('install');
   run('uninstall', ['codex']);
   assert.ok(fs.existsSync(opts.root));
   assert.ok(fs.existsSync(opts.alma));
+  assert.ok(fs.existsSync(opts.agy));
   assert.equal(fs.readFileSync(opts.codex, 'utf8'), initial + '\n[projects."/new"]\ntrust_level = "untrusted"\n');
   run('uninstall', ['alma']);
-  assert.ok(!fs.existsSync(opts.root));
+  assert.ok(fs.existsSync(opts.root));
   assert.ok(!fs.existsSync(opts.alma));
+  assert.ok(fs.existsSync(opts.agy));
+  run('uninstall', ['agy']);
+  assert.ok(!fs.existsSync(opts.root));
+  assert.ok(!fs.existsSync(opts.agy));
 });
 
 test('Explicit replacement restores original runtime/plugin and only the Codex entry', (t) => {
@@ -177,7 +186,7 @@ test('Unmarked and symlink destinations cannot be removed; unsafe prefixes are r
   fs.writeFileSync(path.join(opts.root, 'user-file'), 'preserve');
   run('uninstall', [], false);
   assert.equal(fs.readFileSync(path.join(opts.root, 'user-file'), 'utf8'), 'preserve');
-  for (const prefix of [home, path.dirname(home), '/', path.dirname(opts.codex), opts.alma]) {
+  for (const prefix of [home, path.dirname(home), '/', path.dirname(opts.codex), opts.alma, opts.agy]) {
     assert.throws(() => options(['--prefix', prefix], env, home), /prefix/);
   }
   const link = path.join(base, 'linked-runtime');
@@ -191,6 +200,7 @@ test('An explicit prefix and Codex-only install do not create the Alma plugin', 
   run('install', ['codex', '--prefix', prefix]);
   assert.ok(!fs.existsSync(opts.root));
   assert.ok(!fs.existsSync(opts.alma));
+  assert.ok(!fs.existsSync(opts.agy));
   run('uninstall', ['codex', '--prefix', prefix]);
   assert.ok(!fs.existsSync(prefix));
   assert.equal(fs.readFileSync(opts.codex, 'utf8'), initial);

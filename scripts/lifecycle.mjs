@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 export const SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const MARKER = '.agent-intercom-install.json';
-export const RUNTIME_FILES = ['endpoint.mjs', 'tools.mjs', 'codex.mjs', 'bridge.mjs', 'server.mjs', 'alma.mjs', 'package.json', 'package-lock.json'];
+export const RUNTIME_FILES = ['endpoint.mjs', 'tools.mjs', 'codex.mjs', 'bridge.mjs', 'server.mjs', 'alma.mjs', 'agy.mjs', 'package.json', 'package-lock.json'];
 const ENV_VARS = ['CODEX_HOME', 'CODEX_INTERCOM_SOCKET', 'PI_CODING_AGENT_DIR', 'PI_INTERCOM_SCOPE_ID', 'INTERCOM_PACKAGE'];
 const exists = (file) => fs.existsSync(file) || (() => { try { fs.lstatSync(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } })();
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -39,20 +39,22 @@ export function options(argv, env = process.env, home = os.homedir()) {
     else if (arg === '--prefix') {
       prefix = argv[++i];
       if (!prefix || !path.isAbsolute(prefix)) fail('--prefix requires an absolute directory');
-    } else if (['codex', 'alma', 'all'].includes(arg) && !selected) { target = arg; selected = true; }
+    } else if (['codex', 'alma', 'agy', 'all'].includes(arg) && !selected) { target = arg; selected = true; }
     else fail(`Unknown argument: ${arg}`);
   }
   const root = canonical(path.resolve(prefix));
   const codexHome = canonical(path.resolve(env.CODEX_HOME || path.join(home, '.codex')));
   const configHome = canonical(path.resolve(env.XDG_CONFIG_HOME || path.join(home, '.config')));
+  const agyHome = canonical(path.resolve(env.GEMINI_CONFIG_DIR || path.join(home, '.gemini/config')));
   const codex = canonical(path.join(codexHome, 'config.toml'));
   const alma = canonical(path.join(configHome, 'alma/plugins/intercom-bridge'));
-  for (const protectedPath of [canonical(home), canonical(SOURCE), codexHome, configHome, codex, alma]) {
+  const agy = canonical(path.join(agyHome, 'plugins/intercom-bridge'));
+  for (const protectedPath of [canonical(home), canonical(SOURCE), codexHome, configHome, agyHome, codex, alma, agy]) {
     if (inside(protectedPath, root)) fail('Runtime prefix must not contain the home, source, or application configuration directories');
   }
-  if (inside(root, alma) || inside(root, codexHome)) fail('Runtime prefix must be separate from application installation paths');
-  for (const file of [root, codex, alma]) plainPath(file);
-  return { root, codex, alma, replace, targets: target === 'all' ? ['codex', 'alma'] : [target] };
+  if (inside(root, alma) || inside(root, agy) || inside(root, codexHome) || inside(root, agyHome)) fail('Runtime prefix must be separate from application installation paths');
+  for (const file of [root, codex, alma, agy]) plainPath(file);
+  return { root, codex, alma, agy, replace, targets: target === 'all' ? ['codex', 'alma', 'agy'] : [target] };
 }
 
 // This intentionally supports conventional TOML table declarations, not every TOML
@@ -300,6 +302,24 @@ function stagePlugin(source, destination, root) {
   } catch (error) { removeCaptured(stage, treeHash(stage)); throw error; }
 }
 
+function stageAgyPlugin(source, destination, root) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const stage = fs.mkdtempSync(path.join(path.dirname(destination), '.agent-intercom-agy-stage-'));
+  try {
+    const manifest = path.join(source, 'agy-plugin', 'plugin.json');
+    const skill = path.join(source, 'agy-plugin', 'skills', 'intercom', 'SKILL.md');
+    for (const file of [manifest, skill]) {
+      if (!fs.lstatSync(file).isFile()) fail(`AGY plugin source must be a regular file: ${path.basename(file)}`);
+    }
+    fs.copyFileSync(manifest, path.join(stage, 'plugin.json'));
+    fs.mkdirSync(path.join(stage, 'skills', 'intercom'), { recursive: true });
+    const rendered = fs.readFileSync(skill, 'utf8').replaceAll('__AGENT_INTERCOM_ROOT__', root);
+    fs.writeFileSync(path.join(stage, 'skills', 'intercom', 'SKILL.md'), rendered);
+    fs.writeFileSync(path.join(stage, 'bridge-root.json'), JSON.stringify({ root }) + '\n', { mode: 0o600 });
+    return stage;
+  } catch (error) { removeCaptured(stage, treeHash(stage)); throw error; }
+}
+
 export function install(opts, source = SOURCE) {
   const { root, targets } = opts;
   const oldState = readState(root);
@@ -323,14 +343,27 @@ export function install(opts, source = SOURCE) {
     else if (exists(opts.alma) && !opts.replace) fail('Alma plugin already exists and is not owned; use --replace-existing');
     pluginBackup = previous?.backup ?? (exists(opts.alma) && !previous ? backupInfo(opts.alma) : null);
   }
+  let agyBackup;
+  if (targets.includes('agy')) {
+    const previous = state.integrations.agy;
+    if (previous && previous.path !== opts.agy) fail('GEMINI_CONFIG_DIR differs from the recorded installation; uninstall the original target first');
+    if (previous) { unchanged(opts.agy, previous.hash); checkBackup(previous.backup, opts.agy); }
+    else if (exists(opts.agy) && !opts.replace) fail('AGY plugin already exists and is not owned; use --replace-existing');
+    agyBackup = previous?.backup ?? (exists(opts.agy) && !previous ? backupInfo(opts.agy) : null);
+  }
   let runtimeStage;
   let pluginStage;
+  let agyStage;
   const discard = [];
   try {
     runtimeStage = stageRuntime(source, root);
     if (targets.includes('alma')) {
       pluginStage = stagePlugin(source, opts.alma, root);
       state.integrations.alma = { path: opts.alma, hash: treeHash(pluginStage), backup: pluginBackup };
+    }
+    if (targets.includes('agy')) {
+      agyStage = stageAgyPlugin(source, opts.agy, root);
+      state.integrations.agy = { path: opts.agy, hash: treeHash(agyStage), backup: agyBackup };
     }
     state.runtimeHash = treeHash(runtimeStage);
     fs.writeFileSync(path.join(runtimeStage, MARKER), JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
@@ -353,11 +386,21 @@ export function install(opts, source = SOURCE) {
         }
         move(pluginStage, opts.alma); undo.push(() => move(opts.alma, pluginStage));
       }
+      if (agyStage) {
+        if (exists(opts.agy)) {
+          const previous = oldState?.integrations.agy;
+          unchanged(opts.agy, previous?.hash ?? agyBackup.hash);
+          const destination = previous ? `${agyStage}-previous` : agyBackup.path;
+          move(opts.agy, destination); undo.push(() => move(destination, opts.agy));
+          if (previous) discard.push({ path: destination, hash: treeHash(destination) });
+        }
+        move(agyStage, opts.agy); undo.push(() => move(opts.agy, agyStage));
+      }
       if (codex) { writeConfig(opts.codex, codex.before, codex.text); undo.push(() => writeConfig(opts.codex, codex.text, codex.before)); }
     });
     for (const old of discard) removeCaptured(old.path, old.hash);
   } finally {
-    for (const stage of [runtimeStage, pluginStage]) if (stage && exists(stage)) removeCaptured(stage, treeHash(stage));
+    for (const stage of [runtimeStage, pluginStage, agyStage]) if (stage && exists(stage)) removeCaptured(stage, treeHash(stage));
   }
 }
 
@@ -381,6 +424,12 @@ export function uninstall(opts) {
     unchanged(alma.path, alma.hash); checkBackup(alma.backup, alma.path);
     delete next.integrations.alma;
   }
+  const agy = selected.includes('agy') ? state.integrations.agy : null;
+  if (agy) {
+    if (agy.path !== opts.agy) fail('GEMINI_CONFIG_DIR differs from the recorded installation');
+    unchanged(agy.path, agy.hash); checkBackup(agy.backup, agy.path);
+    delete next.integrations.agy;
+  }
   const last = Object.keys(next.integrations).length === 0;
   if (last) { unchanged(opts.root, state.runtimeHash, true); checkBackup(state.runtimeBackup, opts.root); }
   const discard = [];
@@ -392,6 +441,13 @@ export function uninstall(opts) {
       move(alma.path, retired); undo.push(() => move(retired, alma.path));
       discard.push({ path: retired, hash: alma.hash });
       if (alma.backup) { move(alma.backup.path, alma.path); undo.push(() => move(alma.path, alma.backup.path)); }
+    }
+    if (agy) {
+      unchanged(agy.path, agy.hash);
+      const retired = `${agy.path}.agent-intercom-remove-${crypto.randomUUID()}`;
+      move(agy.path, retired); undo.push(() => move(retired, agy.path));
+      discard.push({ path: retired, hash: agy.hash });
+      if (agy.backup) { move(agy.backup.path, agy.path); undo.push(() => move(agy.path, agy.backup.path)); }
     }
     if (last) {
       unchanged(opts.root, state.runtimeHash, true);

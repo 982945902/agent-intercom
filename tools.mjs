@@ -2,7 +2,7 @@ const text = { type: 'string', minLength: 1, maxLength: 65536 };
 const target = { type: 'string', minLength: 1, maxLength: 256 };
 const definitions = [
   ['intercom_join', 'Join this existing conversation to Intercom. Call once before other tools. The host supplies your true thread identity; name optionally names this thread. Never supply another thread ID.', { name: { type: 'string', minLength: 1, maxLength: 80 } }, [], false],
-  ['intercom_list', 'List live joined OMP, Codex and Alma peers. Target a unique name or full ID; names may collide.', {}, [], true],
+  ['intercom_list', 'List live joined OMP, Codex, Alma and AGY peers. Target a unique name or full ID; names may collide.', {}, [], true],
   ['intercom_status', 'Show this conversation’s stable Intercom identity and connection state.', {}, [], true],
   ['intercom_send', 'Send a message to an existing live peer. Can start agent work under the recipient’s existing permissions. Delivery is not proof of model completion.', { to: target, message: text }, ['to', 'message'], false],
   ['intercom_ask', 'Ask a live peer and wait for its exactly correlated reply. Only one pending ask per session. Timeout stops waiting, not the recipient’s work. Prefer send unless blocked.', { to: target, message: text, timeout_ms: { type: 'integer', minimum: 1, maximum: 600000 } }, ['to', 'message'], false],
