@@ -13,7 +13,7 @@ flowchart LR
   AgyDaemon <--> Broker
 ```
 
-The OMP plugin and broker protocol are unchanged. Codex identity comes from host-supplied `_meta.threadId`, with delivery through `thread/queue/add`. Alma identity comes from its native host context, with delivery through `steer_generation` using `source: "intercom"`. AGY identity comes from the host-injected `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_SOURCE_METADATA`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_CSRF_TOKEN`, verified via `LanguageServerService/GetConversationMetadata` and delivered through `LanguageServerService/SendAgentMessage`.
+The OMP plugin and broker protocol are unchanged. Codex identity comes from host-supplied `_meta.threadId`, with delivery through `thread/queue/add`. Alma identity comes from its native host context, with delivery through `steer_generation` using `source: "intercom"`. AGY identity comes from the host-injected `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_SOURCE_METADATA`, `ANTIGRAVITY_LS_ADDRESS`, and `ANTIGRAVITY_CSRF_TOKEN`, verified via `LanguageServerService/GetConversationMetadata` and delivered through `LanguageServerService/SendUserCascadeMessage`.
 
 ## Prerequisites and compatibility
 

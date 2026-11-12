@@ -93,10 +93,10 @@ export class AgyConnection {
 
   async deliver(lsAddress, csrfToken, id, messageId, text) {
     await this.conversation(lsAddress, csrfToken, id);
-    await this.request(lsAddress, csrfToken, 'SendAgentMessage', {
-      recipient: id,
-      content: text,
-      title: `Intercom message ${String(messageId).slice(0, 8)}`,
+    await this.request(lsAddress, csrfToken, 'SendUserCascadeMessage', {
+      cascadeId: id,
+      items: [{ text }],
+      clientMessageId: String(messageId),
     });
     return { state: 'queued', conversationId: id, messageId };
   }
