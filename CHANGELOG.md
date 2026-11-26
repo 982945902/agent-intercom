@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0
+
+- Add a local TypeScript daemon, versioned SDK and SQLite storage for sessions, groups, messages and delivery receipts.
+- Add a live Dashboard and CLI for forming groups from connected sessions, moving them atomically and inspecting delivery history.
+- Load the OMP integration as a native plugin and the Antigravity integration as a Skill with a local CLI bridge.
+- Use a separate v2 runtime directory. Existing v1 integrations remain available from the v1 line.
+
 ## 1.0.0 — Initial public packaging
 
 - Package the existing OMP/Codex/Alma bridge around the unchanged `pi-intercom` broker protocol; retain original native conversation identities and OMP's existing plugin.

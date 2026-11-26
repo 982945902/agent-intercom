@@ -4,15 +4,15 @@ Agent Intercom's own code has no selected open-source license (`UNLICENSED`). Th
 
 ## Direct dependencies
 
-The following versions and attributions were checked against their installed package metadata and license files:
+The lockfile records the exact package versions. Direct runtime dependencies ship under the following licenses.
 
-| Package | Version | License | Copyright notice |
-| --- | --- | --- | --- |
-| `pi-intercom` | 0.18.1 | MIT | Copyright (c) 2026 Nico Bailon |
-| [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) | 1.32.2 | MIT | Copyright (c) 2024 Anthropic, PBC |
-| [`ws`](https://github.com/websockets/ws) | 8.22.2 | MIT | Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>; Copyright (c) 2013 Arnout Kazemier and contributors; Copyright (c) 2016 Luigi Pinca and contributors |
+| Package | License | Copyright notice |
+| --- | --- | --- |
+| `react` | MIT | Copyright (c) Meta Platforms, Inc. and affiliates. |
+| `react-dom` | MIT | Copyright (c) Meta Platforms, Inc. and affiliates. |
+| `zod` | MIT | Copyright (c) 2025 Colin McDonnell |
 
-The email above is part of the upstream public copyright notice, not a project maintainer contact.
+TypeScript is a build dependency under Apache-2.0. Vite and the direct `@types/*` packages are build dependencies under MIT. Their installed license files contain the applicable terms and notices.
 
 ### MIT license terms
 
@@ -40,4 +40,4 @@ SOFTWARE.
 
 This is not an exhaustive inventory of transitive dependencies. `package-lock.json` identifies the resolved dependency graph; each installed package's own license and notices govern it. Review those files when distributing an installation, rather than assuming every transitive dependency uses MIT.
 
-OMP, Codex and Alma are separately installed host applications, not bundled here. No Alma application source is shipped. Names identify interoperability targets and do not imply sponsorship, endorsement, or an official compatibility commitment.
+OMP and Antigravity are separately installed host applications. Names identify interoperability targets and do not imply sponsorship, endorsement, or an official compatibility commitment.
