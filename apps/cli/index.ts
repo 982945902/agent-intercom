@@ -4,8 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { callAgyBridge } from '../../packages/adapters/agy/bridge.js';
-import { asObject } from '../../packages/adapters/agy/host.js';
-import { isAgyCommand, type AgyCommand } from '../../packages/adapters/agy/session.js';
+import { isAgyCommand } from '../../packages/adapters/agy/session.js';
 import { errorPayload, IntercomError, type Results } from '../../packages/sdk/index.js';
 import { createLocalControlSdk } from '../../packages/sdk/node.js';
 
@@ -28,7 +27,6 @@ Run from Antigravity's run_command
   agy ask TO TEXT [--timeout-ms MILLISECONDS]
   agy reply MESSAGE_ID TEXT [--client-request-id ID]
   agy broadcast TEXT [--client-request-id ID]
-  intercom_<command> [JSON_ARGUMENTS]
 
 --json prints exactly one JSON response with ok and result or error.
 Exit status: 0 success, 1 operation failed, 2 invalid input, 3 unavailable or not joined,
@@ -58,21 +56,6 @@ function integer(raw: string | undefined, name: string): number | undefined {
     throw new IntercomError('INVALID_REQUEST', `${name} must be a whole number`);
   }
   return number;
-}
-
-function legacyInput(command: AgyCommand, args: string[]): Record<string, unknown> {
-  if (args.length > 1) throw new IntercomError('INVALID_REQUEST', 'Legacy AGY commands accept a single JSON argument object');
-  let object: Record<string, unknown> | undefined;
-  try { object = asObject(JSON.parse(args[0] ?? '{}')); } catch {}
-  if (!object) throw new IntercomError('INVALID_REQUEST', 'Legacy AGY arguments must be a JSON object');
-  switch (command) {
-    case 'join': return { name: object.name };
-    case 'send': return { to: object.to, text: object.message, clientRequestId: object.client_request_id };
-    case 'ask': return { to: object.to, text: object.message, timeoutMs: object.timeout_ms };
-    case 'reply': return { replyTo: object.reply_to, text: object.message, clientRequestId: object.client_request_id };
-    case 'broadcast': return { text: object.message, clientRequestId: object.client_request_id };
-    default: return {};
-  }
 }
 
 async function daemonStart(signal: AbortSignal): Promise<Results['status']> {
@@ -119,50 +102,40 @@ async function run(argv: string[], signal: AbortSignal): Promise<Value> {
     allow();
     return { help };
   }
-  const legacy = root.startsWith('intercom_');
-  const native = root === 'agy' || legacy || (isAgyCommand(root) && (
-    Boolean(process.env.ANTIGRAVITY_CONVERSATION_ID) || (root !== 'status' && root !== 'list')
-  ));
-  if (native) {
-    const raw = root === 'agy' ? rest[0] : legacy ? root.slice('intercom_'.length) : root;
-    const args = root === 'agy' ? rest.slice(1) : rest;
+  if (root === 'agy') {
+    const [raw, ...args] = rest;
     if (!isAgyCommand(raw)) throw new IntercomError('INVALID_REQUEST', 'Unknown AGY command. Run intercom --help for usage.');
     let input: Record<string, unknown>;
-    if (legacy) {
-      allow();
-      input = legacyInput(raw, args);
-    } else {
-      switch (raw) {
-        case 'join':
-          allow('name');
-          count(args, 0, values.name === undefined ? 1 : 0);
-          input = { name: values.name ?? args[0] };
-          break;
-        case 'send':
-          allow('client-request-id');
-          count(args, 2);
-          input = { to: args[0], text: args[1], clientRequestId: values['client-request-id'] };
-          break;
-        case 'ask':
-          allow('timeout-ms');
-          count(args, 2);
-          input = { to: args[0], text: args[1], timeoutMs: integer(values['timeout-ms'], '--timeout-ms') };
-          break;
-        case 'reply':
-          allow('client-request-id');
-          count(args, 2);
-          input = { replyTo: args[0], text: args[1], clientRequestId: values['client-request-id'] };
-          break;
-        case 'broadcast':
-          allow('client-request-id');
-          count(args, 1);
-          input = { text: args[0], clientRequestId: values['client-request-id'] };
-          break;
-        default:
-          allow();
-          count(args, 0);
-          input = {};
-      }
+    switch (raw) {
+      case 'join':
+        allow('name');
+        count(args, 0, values.name === undefined ? 1 : 0);
+        input = { name: values.name ?? args[0] };
+        break;
+      case 'send':
+        allow('client-request-id');
+        count(args, 2);
+        input = { to: args[0], text: args[1], clientRequestId: values['client-request-id'] };
+        break;
+      case 'ask':
+        allow('timeout-ms');
+        count(args, 2);
+        input = { to: args[0], text: args[1], timeoutMs: integer(values['timeout-ms'], '--timeout-ms') };
+        break;
+      case 'reply':
+        allow('client-request-id');
+        count(args, 2);
+        input = { replyTo: args[0], text: args[1], clientRequestId: values['client-request-id'] };
+        break;
+      case 'broadcast':
+        allow('client-request-id');
+        count(args, 1);
+        input = { text: args[0], clientRequestId: values['client-request-id'] };
+        break;
+      default:
+        allow();
+        count(args, 0);
+        input = {};
     }
     return await callAgyBridge(raw, input, { signal });
   }

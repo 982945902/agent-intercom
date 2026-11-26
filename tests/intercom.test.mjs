@@ -118,6 +118,27 @@ test('routing, receipts, active asks, group moves and membership survive reconne
   }
 });
 
+test('AGY session commands require the agy namespace', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp('/tmp/intercom-test-');
+  let server;
+  try {
+    server = await startDaemon(directory);
+    const env = { ...server.env, ANTIGRAVITY_CONVERSATION_ID: 'invalid' };
+    const call = (...args) => run(process.execPath, [cli, ...args, '--json'], { env });
+    const status = JSON.parse((await call('status')).stdout);
+    assert.equal(status.result.onlineSessions, 0);
+    const list = JSON.parse((await call('list')).stdout);
+    assert.deepEqual(list.result, []);
+    for (const args of [['intercom_join', '{"name":"legacy"}'], ['join', 'implicit']]) {
+      await assert.rejects(call(...args), error => JSON.parse(error.stdout).error.code === 'INVALID_REQUEST');
+    }
+    await assert.rejects(call('agy', 'join'), error => JSON.parse(error.stdout).error.code === 'AGY_CONTEXT_REQUIRED');
+  } finally {
+    await server?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function thirdPeerBroadcast(peer, id) {
   const record = await peer.sdk.broadcast({ text: 'default only' });
   assert.equal(record.message.fromSessionId, id);

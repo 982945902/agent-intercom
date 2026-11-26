@@ -6,6 +6,7 @@
 - Add a live Dashboard and CLI for forming groups from connected sessions, moving them atomically and inspecting delivery history.
 - Redesign the Dashboard around a group sidebar, responsive session roster and message history, with native dialogs for bulk membership changes.
 - Load the OMP integration as a native plugin and the Antigravity integration as a Skill with a local CLI bridge.
+- Use `intercom agy …` for Antigravity session commands so top-level management commands act the same inside and outside Antigravity.
 - Use a separate v2 runtime directory. Existing v1 integrations remain available from the v1 line.
 
 ## 1.0.0 — Initial public packaging
