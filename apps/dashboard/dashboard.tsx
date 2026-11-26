@@ -3,6 +3,7 @@ import { IntercomError, type Session } from '../../packages/sdk/index.js';
 import { GroupActivity } from './activity.js';
 import { History } from './history.js';
 import { errorMessage, sdk, useLiveEvents, useResource } from './live.js';
+import { cliNames, SessionIcon } from './session-icon.js';
 
 const selectionLimit = 100;
 const loadRoster = () => sdk.listGroups();
@@ -299,11 +300,11 @@ function SessionRow({ session, groupName, selected, disabled, onToggle }: Sessio
       <td><label className="check-target"><input type="checkbox" aria-label={`Select ${session.name}`} checked={selected} disabled={disabled} onChange={() => onToggle(session.id)} /></label></td>
       <th scope="row">
         <div className="session-cell">
-          <span className="terminal-mark" aria-hidden="true">{session.adapterKind.slice(0, 1).toUpperCase()}</span>
+          <span className="terminal-mark"><SessionIcon kind={session.adapterKind} /></span>
           <div className="session-identity">
             <span className="session-name" title={session.nativeSessionId}>{session.name}</span>
             <span className="session-meta">
-              <span>{session.adapterKind}</span>
+              <span>{cliNames[session.adapterKind]}</span>
               {session.cwd && <span className="session-path" title={session.cwd}>{session.cwd}</span>}
             </span>
           </div>

@@ -42,7 +42,20 @@ export class Store {
       INSERT INTO groups VALUES ('default', 'default', 1);
       PRAGMA user_version = 1;
     `));
-    else if (schema !== 1) throw new Error(`Unsupported Intercom database schema ${schema}`);
+    if (schema === 0 || schema === 1) this.atomic(() => this.db.exec(`
+      ALTER TABLE sessions ADD COLUMN offline_since INTEGER;
+      ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+      WITH last_presence AS (
+        SELECT json_extract(payload, '$.sessionId') AS id, MAX(cursor) AS cursor
+        FROM events WHERE type = 'session' AND json_extract(payload, '$.state') IN ('online', 'offline') GROUP BY 1
+      )
+      UPDATE sessions SET offline_since = events.timestamp
+      FROM last_presence JOIN events USING (cursor)
+      WHERE sessions.id = last_presence.id AND json_extract(events.payload, '$.state') = 'offline';
+      CREATE INDEX sessions_offline ON sessions(offline_since) WHERE archived = 0;
+      PRAGMA user_version = 2;
+    `));
+    else if (schema !== 2) throw new Error(`Unsupported Intercom database schema ${schema}`);
   }
 
   atomic<T>(work: () => T): T {
@@ -79,24 +92,46 @@ export class Store {
     if (current) {
       const legacyName = `${adapterKind}-${nativeSessionId.slice(0, 8)}`;
       const existingName = current.name === legacyName ? generatedName : current.name;
-      this.db.prepare('UPDATE sessions SET name = ?, cwd = ? WHERE id = ?')
+      this.db.prepare(`UPDATE groups SET version = version + 1
+        WHERE id = (SELECT group_id FROM sessions WHERE id = ? AND archived = 1)`).run(id);
+      this.db.prepare('UPDATE sessions SET name = ?, cwd = ?, offline_since = NULL, archived = 0 WHERE id = ?')
         .run(name ?? existingName, cwd ?? current.cwd, id);
       return this.session(current.id)!;
     }
-    this.db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
+    this.db.prepare(`INSERT INTO sessions(id, adapter_kind, host_id, native_id, name, cwd, group_id, membership_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)`)
       .run(id, adapterKind, hostInstanceId, nativeSessionId, name ?? generatedName, cwd ?? null, defaultGroupId);
     this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?').run(defaultGroupId);
     return this.session(id)!;
   }
 
   session(id: string): StoredSession | undefined {
-    return this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE id = ?`).get(id) as StoredSession | undefined;
+    return this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE id = ? AND archived = 0`).get(id) as StoredSession | undefined;
+  }
+
+  markOffline(now: number, sessionId?: string) {
+    if (sessionId === undefined) {
+      this.db.prepare('UPDATE sessions SET offline_since = ? WHERE offline_since IS NULL').run(now);
+    } else {
+      this.db.prepare('UPDATE sessions SET offline_since = ? WHERE id = ?').run(now, sessionId);
+    }
+  }
+
+  archiveOffline(cutoff: number): boolean {
+    const expired = this.db.prepare(`UPDATE sessions SET archived = 1
+      WHERE archived = 0 AND offline_since <= ? RETURNING id, group_id AS groupId`).all(cutoff);
+    for (const session of expired) {
+      this.event('session', { sessionId: String(session.id), groupId: String(session.groupId), state: 'archived' });
+    }
+    const updateGroup = this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?');
+    for (const id of new Set(expired.map(session => String(session.groupId)))) updateGroup.run(id);
+    return expired.length > 0;
   }
 
   sessions(groupId?: string): StoredSession[] {
     return (groupId === undefined
-      ? this.db.prepare(`SELECT ${sessionColumns} FROM sessions ORDER BY name, id`).all()
-      : this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE group_id = ? ORDER BY name, id`).all(groupId)) as StoredSession[];
+      ? this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE archived = 0 ORDER BY name, id`).all()
+      : this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE archived = 0 AND group_id = ? ORDER BY name, id`).all(groupId)) as StoredSession[];
   }
 
   group(id: string, online: Online): Group {

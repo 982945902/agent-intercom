@@ -12,11 +12,13 @@ The lockfile records the exact package versions. Direct runtime dependencies shi
 | `react-dom` | MIT | Copyright (c) Meta Platforms, Inc. and affiliates. |
 | `zod` | MIT | Copyright (c) 2025 Colin McDonnell |
 
+The Dashboard’s Antigravity and Codex vectors come from `@lobehub/icons-static-svg` 1.106.0 (MIT, LobeHub). The OMP glyph is based on the icon at `omp.sh`, and the Alma icon comes from the Alma application. The marks identify their respective hosts.
+
 TypeScript is a build dependency under Apache-2.0. Vite and the direct `@types/*` packages are build dependencies under MIT. Their installed license files contain the applicable terms and notices.
 
 ### MIT license terms
 
-The following terms apply separately to each of the above dependencies, with its respective copyright notice:
+The following terms apply separately to the MIT-licensed dependencies and artwork above, with their respective copyright notices.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

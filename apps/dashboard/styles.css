@@ -103,7 +103,6 @@ h1, h2, h3 { text-wrap: balance; overflow-wrap: anywhere; }
 .activity-empty { margin: 0; padding: 3.5rem 1rem; color: #d2c8e9; text-align: center; font-size: .84rem; }
 .activity-star { color: #e0d1ff; }
 .activity-star[data-online="false"] { color: #a49ab8; }
-.activity-star > path { fill: currentColor; }
 .activity-star > text { fill: currentColor; stroke: #19142e; stroke-width: 4px; stroke-linejoin: round; paint-order: stroke; font-size: 12px; font-weight: 675; }
 .activity-orbit { fill: #21193b; stroke: #9b83da; stroke-width: 1px; }
 .activity-star[data-online="false"] .activity-orbit { stroke: currentColor; stroke-dasharray: 2 3; }
@@ -167,7 +166,7 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 .check-target { display: grid; place-items: center; inline-size: var(--target); block-size: var(--target); cursor: pointer; }
 .check-target input { inline-size: 1rem; block-size: 1rem; margin: 0; accent-color: var(--accent); }
 .session-cell { display: flex; align-items: center; gap: .65rem; }
-.terminal-mark { display: grid; place-items: center; flex: none; inline-size: 1.9rem; block-size: 1.9rem; border-radius: .5rem; background: var(--accent-soft); color: var(--accent); font: 750 .75rem ui-monospace, monospace; }
+.terminal-mark { display: grid; place-items: center; flex: none; inline-size: 1.9rem; block-size: 1.9rem; border-radius: .5rem; background: var(--accent-soft); color: var(--accent); }
 .session-identity { min-inline-size: 0; }
 .session-name { display: block; overflow-wrap: anywhere; font-size: .86rem; font-weight: 680; }
 .session-meta { display: flex; flex-wrap: wrap; gap: .05rem .45rem; align-items: baseline; color: var(--muted); font-size: .73rem; font-weight: 480; }
@@ -244,7 +243,9 @@ time { color: var(--muted); font-size: .73rem; }
 }
 
 @container roster (max-width: 25rem) {
-  .terminal-mark { display: none; }
+  .session-cell { gap: .35rem; }
+  .terminal-mark { inline-size: 1.25rem; block-size: 1.25rem; border-radius: .3rem; }
+  .terminal-mark .cli-icon { inline-size: .9rem; block-size: .9rem; }
   :is(th, td) { padding-inline: .35rem; }
   thead th:last-child { inline-size: 4.25rem; }
   .session-meta { display: grid; }

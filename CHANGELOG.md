@@ -10,6 +10,8 @@
 - Use `intercom agy …` for Antigravity session commands so top-level management commands act the same inside and outside Antigravity.
 - Include original ask IDs in late replies and acknowledge OMP delivery when the native host admits the message.
 - Keep OMP subagents out of the peer roster and derive unnamed peer labels from stable Intercom IDs.
+- Archive sessions from the roster and topology after 24 hours offline, retaining identity and message history for resumed sessions.
+- Open the OMP alias dialog from `/intercom-id` and `/intercom-alias`, and show CLI icons on the Dashboard roster and topology.
 - Use a separate v2 runtime directory. Existing v1 integrations remain available from the v1 line.
 
 ## 1.0.0 — Initial public packaging

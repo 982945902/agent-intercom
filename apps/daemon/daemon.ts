@@ -24,10 +24,17 @@ export class Daemon {
   private readonly asks = new Map<string, WaitingAsk>();
 
   constructor(private readonly store: Store, private readonly notify: () => void) {
-    store.atomic(() => store.disconnect());
+    store.atomic(() => {
+      store.disconnect();
+      store.markOffline(Date.now());
+    });
   }
 
   private online = (id: string) => this.connections.has(id);
+
+  archiveOffline(cutoff: number) {
+    if (this.store.atomic(() => this.store.archiveOffline(cutoff))) this.notify();
+  }
 
   control(operation: ControlOperation, input: unknown): Results[ControlOperation] {
     switch (operation) {
@@ -106,6 +113,7 @@ export class Daemon {
     this.connections.delete(sessionId);
     this.store.atomic(() => {
       this.store.disconnect(connection.generation);
+      this.store.markOffline(Date.now(), sessionId);
       const session = this.store.session(sessionId)!;
       this.store.event('session', { sessionId, groupId: session.groupId, state: 'offline' });
     });

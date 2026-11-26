@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { DeliveryState, IntercomEvent, Message, Session } from '../../packages/sdk/index.js';
 import { deliveryLabels, kindLabels } from './message-labels.js';
+import { cliNames, SessionIcon } from './session-icon.js';
 
 const recentMessages = 3;
 
@@ -159,10 +160,10 @@ export function GroupActivity({ messages, sessions, paused, onToggle, onOpen }: 
             const letters = Array.from(session.name);
             const name = letters.length > 17 ? `${letters.slice(0, 16).join('')}…` : session.name;
             return <g className="activity-star" key={session.id} data-online={session.online} transform={`translate(${x} ${y})`}>
-              <title>{`${session.name} · ${session.adapterKind} · ${session.online ? 'Online' : 'Offline'}`}</title>
+              <title>{`${session.name} · ${cliNames[session.adapterKind]} · ${session.online ? 'Online' : 'Offline'}`}</title>
               {session.online && <circle className="activity-halo" r="35" fill="url(#activity-halo)" />}
               <circle className="activity-orbit" r="17" />
-              <path d="M 0 -12 Q 2 -2 12 0 Q 2 2 0 12 Q -2 2 -12 0 Q -2 -2 0 -12 Z" />
+              <SessionIcon kind={session.adapterKind} offset={-9} />
               <text textAnchor="middle" y="31">{name}</text>
             </g>;
           })}

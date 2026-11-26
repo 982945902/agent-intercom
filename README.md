@@ -30,7 +30,7 @@ The examples use `node dist/apps/cli/index.js` from this checkout. Use `npm link
 
 ## Join from OMP and AGY
 
-**OMP.** Start OMP with the built extension. The top-level session joins on startup and keeps its Intercom ID when resumed. Subagents stay outside the roster. Use `/intercom-alias omp-a` to give your session an easy-to-find name.
+**OMP.** Start OMP with the built extension. The top-level session joins on startup and keeps its Intercom ID when resumed. Subagents stay outside the roster. Choose `/intercom-id` to enter a new alias in a dialog, or run `/intercom-id omp-a` to set it directly. `/intercom-alias` opens the same dialog.
 
 ```sh
 omp -e "$PWD/dist/packages/adapters/omp/index.js"
@@ -62,6 +62,8 @@ intercom messages list --group GROUP_ID --json
 ```
 
 A session first joins `default` and restores its last group when it reconnects. The daemon moves the selected sessions atomically without restarting their native conversations. It rejects moves involving an active ask and expires queued deliveries that can no longer be routed within their original group. Messages already admitted by a host can continue running.
+
+The daemon checks every five minutes and on startup for sessions that have been offline for at least 24 hours. It removes them from the roster and topology while retaining their IDs, aliases, groups, and message history. Rejoining restores the session to the roster.
 
 The peer list, direct sends and broadcasts use the sender’s current group. Use full session IDs to disambiguate names. The Dashboard and management CLI can inspect all groups on the local daemon. Intercom trusts processes under the same local account, and group membership controls message routing within that account.
 

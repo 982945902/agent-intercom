@@ -81,6 +81,9 @@ async function main() {
   const clients = new Set<{ flush(): void; close(): void }>();
   const store = new Store(join(directory, 'intercom.sqlite'));
   const daemon = new Daemon(store, () => { for (const client of clients) client.flush(); });
+  const offlineRetention = 24 * 60 * 60 * 1000;
+  const sweepOffline = () => daemon.archiveOffline(Date.now() - offlineRetention);
+  sweepOffline();
   let origin = '';
   let closing = false;
   const shutdownPeers = new Set<() => void>();
@@ -265,10 +268,12 @@ async function main() {
   writeFileSync(`${endpointPath}.tmp`, JSON.stringify({ origin, token, pid: process.pid }), { mode: 0o600 });
   renameSync(`${endpointPath}.tmp`, endpointPath);
   console.log(`Intercom listening at ${origin}`);
+  const offlineSweep = setInterval(sweepOffline, 5 * 60 * 1000);
 
   function shutdown() {
     if (closing) return;
     closing = true;
+    clearInterval(offlineSweep);
     for (const client of clients) client.close();
     for (const closePeer of shutdownPeers) closePeer();
     http.close();

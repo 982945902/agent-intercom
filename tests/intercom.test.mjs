@@ -3,6 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -119,21 +120,73 @@ test('routing, receipts, active asks, group moves and membership survive reconne
   }
 });
 
+test('startup archives stale offline sessions and preserves history and resume identity', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp('/tmp/intercom-test-');
+  let server;
+  const connections = [];
+  try {
+    server = await startDaemon(directory);
+    const control = createLocalControlSdk(directory);
+    const old = await connect(directory, 'agy', 'stale-peer', []);
+    const recent = await connect(directory, 'omp', 'recent-peer', []);
+    connections.push(old, recent);
+    const [stale, current] = await Promise.all(connections.map(connection => connection.sdk.sessionStatus()));
+    const { group } = await control.createGroup({ name: 'retention', sessionIds: [stale.id, current.id] });
+    const sent = await recent.sdk.send({ to: stale.id, text: 'Keep this history' });
+    await old.sdk.rename({ name: 'saved-alias' });
+    old.close();
+    await eventually(async () => (await control.listSessions({ online: false })).length === 1);
+    recent.close();
+    await server.close();
+    server = undefined;
+
+    const db = new DatabaseSync(join(directory, 'intercom.sqlite'));
+    try {
+      db.exec('DROP INDEX sessions_offline; ALTER TABLE sessions DROP COLUMN archived; ALTER TABLE sessions DROP COLUMN offline_since; PRAGMA user_version = 1');
+      db.prepare(`UPDATE events SET timestamp = ? WHERE type = 'session' AND json_extract(payload, '$.sessionId') = ?
+        AND json_extract(payload, '$.state') = 'offline'`).run(Date.now() - 25 * 60 * 60 * 1000, stale.id);
+    } finally { db.close(); }
+
+    server = await startDaemon(directory);
+    const restarted = createLocalControlSdk(directory);
+    assert.deepEqual((await restarted.listSessions({ online: false })).map(session => session.id), [current.id]);
+    assert.deepEqual((await restarted.listGroups()).find(item => item.id === group.id).members.map(session => session.id), [current.id]);
+    assert.equal((await restarted.getMessage({ messageId: sent.message.id })).deliveries[0].toSessionId, stale.id);
+    assert.ok((await restarted.readEvents({ after: 0 })).events.some(event => event.sessionId === stale.id && event.state === 'archived'));
+
+    const resumed = await openLocalSession({ adapterKind: 'agy', hostInstanceId: 'test', nativeSessionId: 'stale-peer' },
+      async () => {}, { directory });
+    connections.push(resumed);
+    const presence = await resumed.sdk.sessionStatus();
+    assert.equal(presence.id, stale.id);
+    assert.equal(presence.name, 'saved-alias');
+    assert.equal(presence.groupId, group.id);
+    assert.deepEqual((await restarted.listSessions({ online: true })).map(session => session.id), [stale.id]);
+  } finally {
+    for (const connection of connections) connection.close();
+    await server?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('OMP acknowledges native admission before the turn finishes and shows late reply correlation', { timeout: 10000 }, async () => {
   const directory = await mkdtemp('/tmp/intercom-test-');
   const oldDirectory = process.env.INTERCOM_RUNTIME_DIR;
   process.env.INTERCOM_RUNTIME_DIR = directory;
   const handlers = new Map();
+  const commands = new Map();
+  const prompts = [];
+  let input;
   const tools = new Map();
   const submitted = [];
   const ctx = {
-    agent: { kind: 'main' }, cwd: directory, sessionManager: { getSessionId: () => 'native-omp' },
-    ui: { setStatus() {}, notify() {} },
+    agent: { kind: 'main' }, hasUI: true, cwd: directory, sessionManager: { getSessionId: () => 'native-omp' },
+    ui: { setStatus() {}, notify() {}, async input(title, placeholder) { prompts.push({ title, placeholder }); return input; } },
   };
   intercomExtension({
     on: (event, handler) => handlers.set(event, handler),
     registerTool: tool => tools.set(tool.name, tool),
-    registerCommand() {},
+    registerCommand: (name, command) => commands.set(name, command),
     sendUserMessage(text) {
       const result = Promise.withResolvers();
       submitted.push({ text, ...result });
@@ -189,6 +242,16 @@ test('OMP acknowledges native admission before the turn finishes and shows late 
     assert.equal(resumed.id, omp.id);
     assert.equal(resumed.name, omp.name);
     assert.deepEqual((await control.listSessions({})).map(session => session.id).sort(), [recipient, omp.id].sort());
+
+    await commands.get('intercom-id').handler('', ctx);
+    assert.deepEqual(prompts, [{ title: 'Set Intercom alias', placeholder: `Current alias: ${omp.name}` }]);
+    assert.equal((await control.listSessions({ groupId: group.id }))[0].name, omp.name);
+    input = '  dialog-alias  ';
+    await commands.get('intercom-id').handler('', ctx);
+    assert.equal((await control.listSessions({ groupId: group.id }))[0].name, 'dialog-alias');
+    await commands.get('intercom-alias').handler('inline-alias', ctx);
+    assert.equal((await control.listSessions({ groupId: group.id }))[0].name, 'inline-alias');
+    assert.equal(prompts.length, 2);
   } finally {
     handlers.get('session_shutdown')({}, ctx);
     for (const submission of submitted) submission.resolve();

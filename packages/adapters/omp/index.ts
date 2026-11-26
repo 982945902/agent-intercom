@@ -16,9 +16,11 @@ const intercomMessageId = /^\[Intercom (?:peer message|late reply)\] From [^\r\n
 interface OmpContext {
   agent: { kind: 'main' | 'sub' };
   cwd: string;
+  hasUI: boolean;
   sessionManager: { getSessionId(): string };
   ui: {
     setStatus(key: string, text: string | undefined): void;
+    input(title: string, placeholder?: string): Promise<string | undefined>;
     notify(text: string, kind: 'info' | 'error'): void;
   };
 }
@@ -148,22 +150,39 @@ export default function intercomExtension(omp: OmpApi): void {
     if (messageId) active.admissions.get(messageId)?.();
   });
 
-  omp.registerCommand('intercom-alias', {
-    description: 'Show or change this session’s Intercom alias. Usage: /intercom-alias [name]',
-    async handler(args, ctx) {
+  const aliasCommand = {
+    description: 'Edit this session’s Intercom alias. Usage: /intercom-id [name]',
+    async handler(args: string, ctx: OmpContext) {
       try {
         const sdk = sessionSdk(ctx);
-        const session = active;
-        const name = args.trim();
-        const presence = name ? await sdk.rename({ name }) : await sdk.sessionStatus();
-        if (session && isCurrent(session)) {
+        const session = active!;
+        let name = args.trim();
+        if (!name) {
+          const presence = await sdk.sessionStatus();
+          if (!isCurrent(session)) return;
+          if (!ctx.hasUI) {
+            ctx.ui.notify(`Intercom alias: ${presence.name} · group: ${presence.groupId} · ${presence.online ? 'online' : 'offline'} · ID: ${presence.id}`, 'info');
+            return;
+          }
+          const entered = await ctx.ui.input('Set Intercom alias', `Current alias: ${presence.name}`);
+          if (entered === undefined || !isCurrent(session)) return;
+          name = entered.trim();
+          if (!name) {
+            ctx.ui.notify('Intercom alias cannot be empty', 'error');
+            return;
+          }
+        }
+        const presence = await sdk.rename({ name });
+        if (isCurrent(session)) {
           ctx.ui.notify(`Intercom alias: ${presence.name} · group: ${presence.groupId} · ${presence.online ? 'online' : 'offline'}`, 'info');
         }
       } catch (error) {
         ctx.ui.notify(errorText(error), 'error');
       }
     },
-  });
+  };
+  omp.registerCommand('intercom-id', aliasCommand);
+  omp.registerCommand('intercom-alias', aliasCommand);
 
   registerIntercomTools(tool => omp.registerTool(tool), sessionSdk, ctx => {
     sessionSdk(ctx);
