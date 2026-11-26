@@ -7,7 +7,14 @@ const statusKey = 'agent-intercom';
 
 type SessionEvent = 'session_start' | 'session_switch' | 'session_shutdown';
 
+interface OmpMessageEvent {
+  message: { role: string; attribution?: string; content?: string | { type: string; text?: string }[] };
+}
+
+const intercomMessageId = /^\[Intercom (?:peer message|late reply)\] From [^\r\n]+\nMessage ID: ([\da-f-]{36})\n/;
+
 interface OmpContext {
+  agent: { kind: 'main' | 'sub' };
   cwd: string;
   sessionManager: { getSessionId(): string };
   ui: {
@@ -18,6 +25,7 @@ interface OmpContext {
 
 interface OmpApi {
   on(event: SessionEvent, handler: (event: unknown, ctx: OmpContext) => void): void;
+  on(event: 'message_end', handler: (event: OmpMessageEvent, ctx: OmpContext) => void): void;
   registerTool(tool: OmpTool): void;
   registerCommand(name: string, command: {
     description: string;
@@ -30,6 +38,7 @@ interface ActiveSession {
   ctx: OmpContext;
   identity: NativeIdentity;
   stop: AbortController;
+  admissions: Map<string, () => void>;
   sdk?: SessionSdk;
 }
 
@@ -51,13 +60,18 @@ export default function intercomExtension(omp: OmpApi): void {
       return;
     }
 
+    const text = formatIncoming(incoming);
+    const admission = Promise.withResolvers<void>();
+    session.admissions.set(incoming.message.id, admission.resolve);
     try {
-      // OMP's default user-message path starts an idle turn and atomically steers a streaming turn.
-      await omp.sendUserMessage(formatIncoming(incoming), { attribution: 'agent' });
+      // An idle send can await the whole model turn. The matching native message event confirms admission sooner.
+      await Promise.race([omp.sendUserMessage(text, { attribution: 'agent' }), admission.promise]);
     } catch (error) {
       const state = error instanceof Error && error.name === 'PromptDroppedError' ? 'rejected' : 'delivery_unknown';
       await sdk.receipt({ ...receipt, state, detail: errorText(error).slice(0, 1024) });
       return;
+    } finally {
+      session.admissions.delete(incoming.message.id);
     }
     await sdk.receipt({ ...receipt, state: 'host_accepted' });
   }
@@ -93,6 +107,7 @@ export default function intercomExtension(omp: OmpApi): void {
   }
 
   function startSession(ctx: OmpContext): void {
+    if (ctx.agent.kind !== 'main') return;
     const nativeSessionId = ctx.sessionManager.getSessionId();
     if (active && active.identity.nativeSessionId === nativeSessionId) {
       active.ctx = ctx;
@@ -103,7 +118,7 @@ export default function intercomExtension(omp: OmpApi): void {
 
     // The local namespace keeps a resumed transcript's native identity stable.
     const identity: NativeIdentity = { adapterKind: 'omp', hostInstanceId: 'local', nativeSessionId, cwd: ctx.cwd };
-    const session: ActiveSession = { ctx, identity, stop: new AbortController() };
+    const session: ActiveSession = { ctx, identity, stop: new AbortController(), admissions: new Map() };
     active = session;
     ctx.ui.setStatus(statusKey, 'Intercom connecting');
     void connect(session).catch(error => {
@@ -123,6 +138,14 @@ export default function intercomExtension(omp: OmpApi): void {
   omp.on('session_switch', (_event, ctx) => startSession(ctx));
   omp.on('session_shutdown', (_event, ctx) => {
     if (active?.identity.nativeSessionId === ctx.sessionManager.getSessionId()) stopSession();
+  });
+  omp.on('message_end', ({ message }, ctx) => {
+    if (!active || ctx.sessionManager.getSessionId() !== active.identity.nativeSessionId) return;
+    if (message.role !== 'user' || message.attribution !== 'agent') return;
+    const { content } = message;
+    const text = typeof content === 'string' ? content : content?.find(part => part.type === 'text')?.text;
+    const messageId = text?.match(intercomMessageId)?.[1];
+    if (messageId) active.admissions.get(messageId)?.();
   });
 
   omp.registerCommand('intercom-alias', {

@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import intercomExtension from '../dist/packages/adapters/omp/index.js';
 import { createLocalControlSdk, openLocalSession } from '../dist/packages/sdk/node.js';
 
 const daemon = fileURLToPath(new URL('../dist/apps/daemon/index.js', import.meta.url));
@@ -113,6 +114,87 @@ test('routing, receipts, active asks, group moves and membership survive reconne
     }
   } finally {
     for (const session of sessions) session.close();
+    await server?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('OMP acknowledges native admission before the turn finishes and shows late reply correlation', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp('/tmp/intercom-test-');
+  const oldDirectory = process.env.INTERCOM_RUNTIME_DIR;
+  process.env.INTERCOM_RUNTIME_DIR = directory;
+  const handlers = new Map();
+  const tools = new Map();
+  const submitted = [];
+  const ctx = {
+    agent: { kind: 'main' }, cwd: directory, sessionManager: { getSessionId: () => 'native-omp' },
+    ui: { setStatus() {}, notify() {} },
+  };
+  intercomExtension({
+    on: (event, handler) => handlers.set(event, handler),
+    registerTool: tool => tools.set(tool.name, tool),
+    registerCommand() {},
+    sendUserMessage(text) {
+      const result = Promise.withResolvers();
+      submitted.push({ text, ...result });
+      return result.promise;
+    },
+  });
+  let server;
+  let peer;
+  try {
+    server = await startDaemon(directory);
+    const control = createLocalControlSdk(directory);
+    const inbox = [];
+    peer = await connect(directory, 'agy', 'late-reply-peer', inbox);
+    handlers.get('session_start')({}, ctx);
+    handlers.get('session_start')({}, {
+      ...ctx, agent: { kind: 'sub' }, sessionManager: { getSessionId: () => 'native-omp-sub' },
+    });
+    const omp = await eventually(async () => (await peer.sdk.listPeers()).find(session => session.nativeSessionId === 'native-omp'));
+
+    const sent = await peer.sdk.send({ to: omp.id, text: 'Start the native turn' });
+    const first = await eventually(() => submitted[0]);
+    const emit = (text, attribution) => handlers.get('message_end')({
+      message: { role: 'user', attribution, content: [{ type: 'text', text }] },
+    }, ctx);
+    const delivery = async id => (await control.getMessage({ messageId: id })).deliveries[0].state;
+    emit(first.text, 'user');
+    assert.equal(await delivery(sent.message.id), 'adapter_received');
+    emit(first.text.replace('Start the native turn', 'Text after native mention expansion'), 'agent');
+    await eventually(async () => await delivery(sent.message.id) === 'host_accepted');
+    first.reject(new Error('An error after the host accepted the message'));
+
+    const rejected = await peer.sdk.send({ to: omp.id, text: 'Prompt dropped before admission' });
+    const second = await eventually(() => submitted[1]);
+    second.reject(Object.assign(new Error('Dropped by OMP'), { name: 'PromptDroppedError' }));
+    await eventually(async () => await delivery(rejected.message.id) === 'rejected');
+
+    const recipient = (await peer.sdk.sessionStatus()).id;
+    await assert.rejects(tools.get('intercom_ask').execute('test', {
+      to: recipient, text: 'Expire this ask', timeoutMs: 20,
+    }, undefined, undefined, ctx), { code: 'ASK_TIMEOUT' });
+    const ask = await eventually(() => inbox.find(message => message.kind === 'ask'));
+    const reply = await peer.sdk.reply({ replyTo: ask.id, text: 'Late answer' });
+    const late = await eventually(() => submitted[2]);
+    assert.equal(late.text, `[Intercom late reply] From late-reply-peer\nMessage ID: ${reply.message.id}\nIn reply to ask: ${ask.id}\n\nLate answer`);
+    late.resolve();
+    await eventually(async () => await delivery(reply.message.id) === 'host_accepted');
+
+    const { group } = await control.createGroup({ name: 'resume', sessionIds: [omp.id] });
+    handlers.get('session_shutdown')({}, ctx);
+    await eventually(async () => (await control.listSessions({ groupId: group.id, online: false })).length === 1);
+    handlers.get('session_start')({}, ctx);
+    const resumed = await eventually(async () => (await control.listSessions({ groupId: group.id, online: true }))[0]);
+    assert.equal(resumed.id, omp.id);
+    assert.equal(resumed.name, omp.name);
+    assert.deepEqual((await control.listSessions({})).map(session => session.id).sort(), [recipient, omp.id].sort());
+  } finally {
+    handlers.get('session_shutdown')({}, ctx);
+    for (const submission of submitted) submission.resolve();
+    peer?.close();
+    if (oldDirectory === undefined) delete process.env.INTERCOM_RUNTIME_DIR;
+    else process.env.INTERCOM_RUNTIME_DIR = oldDirectory;
     await server?.close();
     await rm(directory, { recursive: true, force: true });
   }

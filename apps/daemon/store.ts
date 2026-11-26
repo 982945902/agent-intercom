@@ -74,14 +74,17 @@ export class Store {
 
   bind(identity: NativeIdentity, current?: StoredSession): StoredSession {
     const { adapterKind, hostInstanceId, nativeSessionId, cwd, name } = identity;
+    const id = current?.id ?? randomUUID();
+    const generatedName = `${adapterKind}-${id.slice(-12)}`;
     if (current) {
+      const legacyName = `${adapterKind}-${nativeSessionId.slice(0, 8)}`;
+      const existingName = current.name === legacyName ? generatedName : current.name;
       this.db.prepare('UPDATE sessions SET name = ?, cwd = ? WHERE id = ?')
-        .run(name ?? current.name, cwd ?? current.cwd, current.id);
+        .run(name ?? existingName, cwd ?? current.cwd, id);
       return this.session(current.id)!;
     }
-    const id = randomUUID();
     this.db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, 1)')
-      .run(id, adapterKind, hostInstanceId, nativeSessionId, name ?? `${adapterKind}-${nativeSessionId.slice(0, 8)}`, cwd ?? null, defaultGroupId);
+      .run(id, adapterKind, hostInstanceId, nativeSessionId, name ?? generatedName, cwd ?? null, defaultGroupId);
     this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?').run(defaultGroupId);
     return this.session(id)!;
   }

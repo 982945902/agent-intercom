@@ -30,7 +30,7 @@ The examples use `node dist/apps/cli/index.js` from this checkout. Use `npm link
 
 ## Join from OMP and AGY
 
-**OMP.** Start OMP with the built extension. The active session joins on startup. Use `/intercom-alias omp-a` to give it an easy-to-find name.
+**OMP.** Start OMP with the built extension. The top-level session joins on startup and keeps its Intercom ID when resumed. Subagents stay outside the roster. Use `/intercom-alias omp-a` to give your session an easy-to-find name.
 
 ```sh
 omp -e "$PWD/dist/packages/adapters/omp/index.js"

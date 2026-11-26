@@ -8,6 +8,8 @@
 - Show a live topology of the selected group's sessions with animated message paths, delivery receipts, pause and reduced-motion support.
 - Load the OMP integration as a native plugin and the Antigravity integration as a Skill with a local CLI bridge.
 - Use `intercom agy …` for Antigravity session commands so top-level management commands act the same inside and outside Antigravity.
+- Include original ask IDs in late replies and acknowledge OMP delivery when the native host admits the message.
+- Keep OMP subagents out of the peer roster and derive unnamed peer labels from stable Intercom IDs.
 - Use a separate v2 runtime directory. Existing v1 integrations remain available from the v1 line.
 
 ## 1.0.0 — Initial public packaging

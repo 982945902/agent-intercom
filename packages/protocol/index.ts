@@ -177,6 +177,10 @@ export function errorPayload(error: unknown) {
 }
 
 export function formatIncoming({ message }: IncomingDelivery): string {
+  const fromName = message.fromName.replace(/[\r\n]+/g, ' ');
+  if (message.kind === 'late_reply') {
+    return `[Intercom late reply] From ${fromName}\nMessage ID: ${message.id}\nIn reply to ask: ${message.replyTo}\n\n${message.text}`;
+  }
   const reply = message.kind === 'ask' ? `\nReply with the Intercom reply tool using message ID ${message.id}.` : '';
-  return `[Intercom peer message] From ${message.fromName}\nMessage ID: ${message.id}${reply}\n\n${message.text}`;
+  return `[Intercom peer message] From ${fromName}\nMessage ID: ${message.id}${reply}\n\n${message.text}`;
 }
