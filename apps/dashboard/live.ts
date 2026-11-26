@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createHttpSdk, type Input, type Results } from '../../packages/sdk/index.js';
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { createHttpSdk, type EventsPage, type Input, type Results } from '../../packages/sdk/index.js';
+import { updateActivity, type ActivityMessage } from './activity.js';
 
 export const sdk = createHttpSdk();
 
@@ -50,18 +51,28 @@ export function useResource<T>(load: () => Promise<T>, revision: number) {
   return { ...resource, refresh };
 }
 
-export function useLiveEvents() {
+export function useLiveEvents(group: { id: string; since: number }) {
+  const [activity, setActivity] = useState<{ group: typeof group; messages: ActivityMessage[] }>();
   const [cursor, setCursor] = useState<number>();
   const [rosterRevision, setRosterRevision] = useState(0);
   const [messageRevision, setMessageRevision] = useState(0);
   const [streamError, setStreamError] = useState<string>();
   const [subscription, setSubscription] = useState(0);
   const lastCursor = useRef<number | undefined>(undefined);
+  const showActivity = useEffectEvent((page: EventsPage, connectedAt: number) => {
+    if (!group.id) return;
+    setActivity(current => {
+      const previous = current?.group === group && !page.reset ? current.messages : [];
+      const messages = updateActivity(previous, page.events, group.id, Math.max(group.since, connectedAt));
+      return current?.group === group && current.messages === messages ? current : { group, messages };
+    });
+  });
 
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
     async function subscribe() {
+      const connectedAt = Date.now();
       try {
         for await (const page of sdk.events(lastCursor.current, signal)) {
           if (signal.aborted) break;
@@ -73,6 +84,7 @@ export function useLiveEvents() {
           }
           if (page.reset || page.events.some(event => event.type === 'message' || event.type === 'delivery' || event.type === 'ask')) {
             setMessageRevision(revision => revision + 1);
+            showActivity(page, connectedAt);
           }
         }
       } catch (error) {
@@ -85,6 +97,7 @@ export function useLiveEvents() {
 
   return {
     cursor, rosterRevision, messageRevision, streamError,
+    activity: activity?.group === group ? activity.messages : [],
     reconnect() {
       setStreamError(undefined);
       setSubscription(attempt => attempt + 1);

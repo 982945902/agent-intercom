@@ -1,27 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AskState, DeliveryState, Message, MessageRecord, Session } from '../../packages/sdk/index.js';
+import type { AskState, DeliveryState, MessageRecord, Session } from '../../packages/sdk/index.js';
 import { historyPageSize, loadHistory, sdk, useResource } from './live.js';
+import { deliveryLabels, kindLabels } from './message-labels.js';
 
-const deliveryLabels: Record<DeliveryState, string> = {
-  queued: 'Queued',
-  adapter_received: 'Adapter received',
-  host_accepted: 'Host accepted',
-  rejected: 'Rejected',
-  delivery_unknown: 'Delivery unknown',
-  expired: 'Expired',
-};
 const askLabels: Record<AskState, string> = {
   waiting: 'Waiting for reply',
   replied: 'Replied',
   timed_out: 'Timed out',
   cancelled: 'Cancelled',
-};
-const kindLabels: Record<Message['kind'], string> = {
-  send: 'Direct',
-  broadcast: 'Broadcast',
-  ask: 'Ask',
-  reply: 'Reply',
-  late_reply: 'Late reply',
 };
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 

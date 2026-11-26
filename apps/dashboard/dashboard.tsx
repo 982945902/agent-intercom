@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { IntercomError, type Session } from '../../packages/sdk/index.js';
+import { GroupActivity } from './activity.js';
 import { History } from './history.js';
 import { errorMessage, sdk, useLiveEvents, useResource } from './live.js';
 
@@ -15,9 +16,10 @@ interface GroupSubmission {
 }
 
 export function Dashboard() {
-  const live = useLiveEvents();
+  const [filter, setFilter] = useState({ id: '', since: 0 });
+  const [motionPaused, setMotionPaused] = useState(false);
+  const live = useLiveEvents(filter);
   const roster = useResource(loadRoster, live.rosterRevision);
-  const [filter, setFilter] = useState('');
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [destination, setDestination] = useState('');
   const [groupDialog, setGroupDialog] = useState<'create' | 'move' | null>(null);
@@ -35,7 +37,7 @@ export function Dashboard() {
     members.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
     return new Map(members.map(session => [session.id, session]));
   }, [roster.data]);
-  const groupId = groupNames.has(filter) ? filter : undefined;
+  const groupId = groupNames.has(filter.id) ? filter.id : undefined;
   const visible = [...sessions.values()].filter(session => groupId === undefined || session.groupId === groupId);
   const selectedIds = [...selection].filter(id => sessions.has(id));
   const selectedVisible = visible.filter(session => selection.has(session.id)).length;
@@ -57,8 +59,8 @@ export function Dashboard() {
   }, [roster.data, sessions]);
 
   function switchGroup(id: string) {
-    if (id === filter) return;
-    setFilter(id);
+    if (id === filter.id) return;
+    setFilter({ id, since: Date.now() });
     setMessageId(null);
   }
 
@@ -191,6 +193,8 @@ export function Dashboard() {
             <button type="button" className="button quiet" onClick={roster.refresh}>Retry roster</button>
           </div>
         )}
+        {groupId && <GroupActivity messages={live.activity} sessions={visible} paused={motionPaused} onOpen={setMessageId}
+          onToggle={() => setMotionPaused(paused => !paused)} />}
         <div className="panels">
           <section className="panel" aria-labelledby="roster-heading">
             <header className="panel-heading">
