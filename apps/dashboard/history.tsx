@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AskState, DeliveryState, Message, MessageRecord, Session } from '../../packages/sdk/index.js';
 import { historyPageSize, loadHistory, sdk, useResource } from './live.js';
 
@@ -63,12 +63,23 @@ export function History({ groupId, groupNames, sessions, revision, messageId, on
   const [count, setCount] = useState(historyPageSize);
   const load = useCallback(() => loadHistory(groupId, count), [groupId, count]);
   const history = useResource(load, revision);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [openedMessage, setOpenedMessage] = useState<string | null>(null);
+  const openedRow = useRef<HTMLButtonElement>(null);
+  const back = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (messageId) back.current?.focus();
+    else if (openedMessage) (openedRow.current ?? heading.current)?.focus();
+  }, [messageId, openedMessage]);
 
   return (
     <section className="panel" aria-labelledby="history-heading">
       <header className="panel-heading">
-        <h2 id="history-heading">Message history</h2>
-        {messageId && <button type="button" className="button quiet" onClick={() => onOpen(null)}>Back to history</button>}
+        <h2 id="history-heading" ref={heading} tabIndex={-1}>{messageId ? 'Message details' : 'Message history'}</h2>
+        {messageId && <button ref={back} type="button" className="button quiet" onClick={() => onOpen(null)}>
+          <span aria-hidden="true">←</span> Back to history
+        </button>}
       </header>
       {messageId ? (
         <MessageDetail key={messageId} {...{ messageId, groupNames, sessions, revision, onOpen }} />
@@ -85,13 +96,15 @@ export function History({ groupId, groupNames, sessions, revision, messageId, on
               <ol className="history-list" aria-label="Messages, newest first">
                 {history.data.records.map(record => (
                   <li key={record.message.id}>
-                    <button className="message-row" type="button" onClick={() => onOpen(record.message.id)}>
+                    <button className="message-row" type="button" ref={openedMessage === record.message.id ? openedRow : undefined}
+                      onClick={() => { setOpenedMessage(record.message.id); onOpen(record.message.id); }}>
                       <span className="message-row-heading">
                         <span className="message-sender">{record.message.fromName}</span>
                         <Timestamp value={record.message.createdAt} />
                       </span>
                       <span className="message-meta">
-                        {kindLabels[record.message.kind]} · {groupNames.get(record.message.groupIdAtAccept) ?? record.message.groupIdAtAccept}
+                        <strong>{kindLabels[record.message.kind]}</strong>
+                        {!groupId && ` · ${groupNames.get(record.message.groupIdAtAccept) ?? record.message.groupIdAtAccept}`}
                       </span>
                       <span className="message-preview">{record.message.text}</span>
                       <MessageStatus record={record} />
@@ -99,7 +112,13 @@ export function History({ groupId, groupNames, sessions, revision, messageId, on
                   </li>
                 ))}
               </ol>
-            ) : <p className="empty-state">No messages in {groupId ? 'this group' : 'your history'} yet.</p>
+            ) : (
+              <div className="empty-state">
+                <span className="empty-icon message-icon" aria-hidden="true" />
+                <p>No messages yet</p>
+                <p>{groupId ? 'Messages sent in this group will appear here.' : 'Messages between joined sessions will appear here.'}</p>
+              </div>
+            )
           ) : history.loading && <p className="empty-state" role="status">Loading messages…</p>}
           {history.data?.nextBefore != null && (
             <footer className="panel-footer">
