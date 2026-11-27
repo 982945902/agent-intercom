@@ -12,6 +12,8 @@
 - Keep OMP subagents out of the peer roster and derive unnamed peer labels from stable Intercom IDs.
 - Archive sessions from the roster and topology after 24 hours offline, retaining identity and message history for resumed sessions.
 - Open the OMP alias dialog from `/intercom-id` and `/intercom-alias`, and show CLI icons on the Dashboard roster and topology.
+- Preserve multiple memberships per session, with shared peer visibility and group-scoped delivery.
+- Add a read-only System view and connect JoyME Watch to v2 for callbacks across business-group changes.
 - Use a separate v2 runtime directory. Existing v1 integrations remain available from the v1 line.
 
 ## 1.0.0 — Initial public packaging

@@ -156,9 +156,9 @@ h1, h2, h3 { text-wrap: balance; overflow-wrap: anywhere; }
 table { border-collapse: separate; border-spacing: 0; inline-size: 100%; table-layout: fixed; text-align: start; }
 thead { position: sticky; inset-block-start: 0; z-index: 1; }
 th, td { padding: .55rem; border-block-end: 1px solid var(--line); text-align: start; }
-tr > :first-child { inline-size: calc(var(--target) + .6rem); padding: .25rem 0 .25rem .4rem; }
+.selection-cell { inline-size: calc(var(--target) + .6rem); padding: .25rem 0 .25rem .4rem; }
 thead th { background: var(--soft); color: var(--muted); font-size: .75rem; font-weight: 660; }
-thead th:nth-child(3) { inline-size: 23%; }
+thead .groups-column { inline-size: 23%; }
 thead th:last-child { inline-size: 5rem; }
 tbody tr:last-child > * { border-block-end: 0; }
 tbody tr:hover { background: var(--soft); }
@@ -257,5 +257,5 @@ time { color: var(--muted); font-size: .73rem; }
 
 @media (forced-colors: active) {
   :focus-visible { outline-color: Highlight; }
-  .group-filters button[aria-pressed="true"], tbody tr[data-selected="true"] > :first-child { border-color: Highlight; }
+  .group-filters button[aria-pressed="true"], tbody tr[data-selected="true"] > .selection-cell { border-color: Highlight; }
 }

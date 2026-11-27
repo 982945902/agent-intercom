@@ -41,6 +41,10 @@ export function runtimeDirectory(env: NodeJS.ProcessEnv = process.env): string {
   return resolve(env.INTERCOM_RUNTIME_DIR || pathJoin(homedir(), '.agent-intercom/v2'));
 }
 
+export function readServiceToken(directory = runtimeDirectory()): string {
+  return readFileSync(pathJoin(directory, 'service-token'), 'utf8').trim();
+}
+
 export function createLocalControlSdk(directory = runtimeDirectory()): ControlSdk {
   try {
     const endpoint = endpointSchema.parse(JSON.parse(readFileSync(pathJoin(directory, 'endpoint.json'), 'utf8')));
@@ -59,7 +63,8 @@ export function createLocalControlSdk(directory = runtimeDirectory()): ControlSd
   }
 }
 
-export async function connectLocal(path: string, onDelivery?: OnDelivery): Promise<LocalTransport> {
+export async function connectLocal(path: string, onDelivery?: OnDelivery, signal?: AbortSignal): Promise<LocalTransport> {
+  signal?.throwIfAborted();
   const socket = createConnection(path);
   socket.setEncoding('utf8');
   const ready = Promise.withResolvers<void>();
@@ -94,7 +99,10 @@ export async function connectLocal(path: string, onDelivery?: OnDelivery): Promi
     }
     if (Buffer.byteLength(buffer) > maxFrameBytes) socket.destroy();
   });
-  await ready.promise;
+  const abort = () => { ready.reject(signal?.reason); socket.destroy(); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try { await ready.promise; }
+  finally { signal?.removeEventListener('abort', abort); }
   return {
     closed: closed.promise,
     close: () => socket.destroy(),
@@ -137,7 +145,7 @@ export interface LocalSession { sdk: SessionSdk; close(): void }
 export async function openLocalSession(
   identity: NativeIdentity,
   onDelivery: (event: IncomingDelivery, sdk: SessionSdk) => Promise<void>,
-  options: { directory?: string; signal?: AbortSignal } = {},
+  options: { directory?: string; signal?: AbortSignal; serviceToken?: string } = {},
 ): Promise<LocalSession> {
   const path = pathJoin(options.directory ?? runtimeDirectory(), 'daemon.sock');
   const stop = new AbortController();
@@ -167,7 +175,7 @@ export async function openLocalSession(
     });
     try {
       if (signal.aborted) throw new IntercomError('CANCELLED', 'Intercom session closed');
-      await createSessionSdk(connection).join(identity);
+      await createSessionSdk(connection).join(identity, options.serviceToken);
       if (signal.aborted) throw new IntercomError('CANCELLED', 'Intercom session closed');
       active = connection;
       return connection;

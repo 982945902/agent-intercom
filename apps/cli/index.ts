@@ -17,16 +17,17 @@ Daemon and management
   group list
   group create NAME [SESSION_ID ...] [--expected SESSION_ID=VERSION ...] [--operation-id ID]
   group move GROUP_ID SESSION_ID ... [--expected SESSION_ID=VERSION ...] [--operation-id ID]
+  group add | remove GROUP_ID SESSION_ID ... [--expected SESSION_ID=VERSION ...] [--operation-id ID]
   messages [list] [--group GROUP_ID] [--before TIMESTAMP] [--limit COUNT]
   messages get MESSAGE_ID
 
 Run from Antigravity's run_command
   agy join [NAME | --name NAME]
-  agy list | status | pending
-  agy send TO TEXT [--client-request-id ID]
-  agy ask TO TEXT [--timeout-ms MILLISECONDS]
+  agy list | groups | status | pending
+  agy send TO TEXT [--group GROUP_ID] [--client-request-id ID]
+  agy ask TO TEXT [--group GROUP_ID] [--timeout-ms MILLISECONDS]
   agy reply MESSAGE_ID TEXT [--client-request-id ID]
-  agy broadcast TEXT [--client-request-id ID]
+  agy broadcast TEXT [--group GROUP_ID] [--client-request-id ID]
 
 --json prints exactly one JSON response with ok and result or error.
 Exit status: 0 success, 1 operation failed, 2 invalid input, 3 unavailable or not joined,
@@ -113,14 +114,14 @@ async function run(argv: string[], signal: AbortSignal): Promise<Value> {
         input = { name: values.name ?? args[0] };
         break;
       case 'send':
-        allow('client-request-id');
+        allow('group', 'client-request-id');
         count(args, 2);
-        input = { to: args[0], text: args[1], clientRequestId: values['client-request-id'] };
+        input = { to: args[0], text: args[1], groupId: values.group, clientRequestId: values['client-request-id'] };
         break;
       case 'ask':
-        allow('timeout-ms');
+        allow('group', 'timeout-ms');
         count(args, 2);
-        input = { to: args[0], text: args[1], timeoutMs: integer(values['timeout-ms'], '--timeout-ms') };
+        input = { to: args[0], text: args[1], groupId: values.group, timeoutMs: integer(values['timeout-ms'], '--timeout-ms') };
         break;
       case 'reply':
         allow('client-request-id');
@@ -128,9 +129,9 @@ async function run(argv: string[], signal: AbortSignal): Promise<Value> {
         input = { replyTo: args[0], text: args[1], clientRequestId: values['client-request-id'] };
         break;
       case 'broadcast':
-        allow('client-request-id');
+        allow('group', 'client-request-id');
         count(args, 1);
-        input = { text: args[0], clientRequestId: values['client-request-id'] };
+        input = { text: args[0], groupId: values.group, clientRequestId: values['client-request-id'] };
         break;
       default:
         allow();
@@ -162,7 +163,7 @@ async function run(argv: string[], signal: AbortSignal): Promise<Value> {
     count(args, 0);
     return createLocalControlSdk().listGroups();
   }
-  if ((root === 'group' || root === 'groups') && (child === 'create' || child === 'move')) {
+  if ((root === 'group' || root === 'groups') && (child === 'create' || child === 'move' || child === 'add' || child === 'remove')) {
     allow('expected', 'operation-id');
     count(args, child === 'create' ? 1 : 2, 101);
     const [destination, ...sessionIds] = args;
@@ -179,8 +180,11 @@ async function run(argv: string[], signal: AbortSignal): Promise<Value> {
       operationId: values['operation-id'],
     };
     const sdk = createLocalControlSdk();
-    return child === 'create' ? sdk.createGroup({ ...membership, name: destination! })
-      : sdk.moveGroup({ ...membership, groupId: destination! });
+    if (child === 'create') return sdk.createGroup({ ...membership, name: destination! });
+    const input = { ...membership, groupId: destination! };
+    if (child === 'add') return sdk.addGroupMembers(input);
+    if (child === 'remove') return sdk.removeGroupMembers(input);
+    return sdk.moveGroup(input);
   }
   if (root === 'messages' && (child === undefined || child === 'list')) {
     allow('group', 'before', 'limit');
@@ -202,8 +206,9 @@ function human(value: Value): string {
   if (Array.isArray(value)) {
     if (!value.length) return 'No results.';
     return value.map(row => {
-      if ('adapterKind' in row) return `${row.id}\t${JSON.stringify(row.name)}\t${row.adapterKind}\t${row.groupId}\t${row.online ? 'online' : 'offline'}`;
+      if ('adapterKind' in row) return `${row.id}\t${JSON.stringify(row.name)}\t${row.adapterKind}\t${(row.groupIds ?? [row.groupId]).join(', ')}\t${row.online ? 'online' : 'offline'}`;
       if ('members' in row) return `${row.id}\t${JSON.stringify(row.name)}\t${row.members.length} members`;
+      if ('version' in row) return `${row.id}\t${JSON.stringify(row.name)}`;
       return `${row.id}\t${JSON.stringify(row.fromName)}\t${JSON.stringify(row.text)}`;
     }).join('\n');
   }
@@ -211,7 +216,7 @@ function human(value: Value): string {
     const status = `Intercom protocol v${value.protocolVersion}, ${value.onlineSessions} online session(s)`;
     return value.dashboardUrl ? `${status}\nDashboard ${value.dashboardUrl}` : status;
   }
-  if ('adapterKind' in value) return `${JSON.stringify(value.name)} (${value.id}) is ${value.online ? 'online' : 'offline'} in group ${value.groupId}`;
+  if ('adapterKind' in value) return `${JSON.stringify(value.name)} (${value.id}) is ${value.online ? 'online' : 'offline'} in ${(value.groupIds ?? [value.groupId]).join(', ')}`;
   return JSON.stringify(value, null, 2);
 }
 

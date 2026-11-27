@@ -1,17 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  defaultGroupId, IntercomError,
+  defaultGroupId, systemGroupId, IntercomError,
   type Delivery, type EventsPage, type Group, type IntercomEvent, type Message,
   type MessageRecord, type MoveResult, type NativeIdentity, type Parameters, type Session,
 } from '../../packages/protocol/index.js';
 
-const sessionColumns = `id, adapter_kind AS adapterKind, native_id AS nativeSessionId, name, cwd,
-  group_id AS groupId, membership_version AS membershipVersion`;
+const sessionColumns = `s.id, s.adapter_kind AS adapterKind, s.native_id AS nativeSessionId, s.name, s.cwd,
+  s.group_id AS groupId, s.membership_version AS membershipVersion,
+  (SELECT json_group_array(group_id ORDER BY group_id) FROM group_members WHERE session_id = s.id) AS groupIds`;
 const messageColumns = `id, group_id AS groupIdAtAccept, from_id AS fromSessionId, from_name AS fromName, text, kind,
   reply_to AS replyTo, created_at AS createdAt, ask_state AS askState`;
 const deliveryColumns = `id, to_id AS toSessionId, state, source, detail`;
-type StoredSession = Omit<Session, 'online'>;
+export type StoredSession = Omit<Session, 'online'>;
+type SessionRow = Omit<StoredSession, 'groupIds'> & { groupIds: string };
+type GroupChange = 'createGroup' | 'moveGroup' | 'addGroupMembers' | 'removeGroupMembers';
+
+function decodeSession(row: unknown): StoredSession {
+  const session = row as SessionRow;
+  return { ...session, groupIds: JSON.parse(session.groupIds) as string[] };
+}
 export type StoredDelivery = Delivery & { messageId: string; generation: string };
 
 type Online = (id: string) => boolean;
@@ -55,7 +63,24 @@ export class Store {
       CREATE INDEX sessions_offline ON sessions(offline_since) WHERE archived = 0;
       PRAGMA user_version = 2;
     `));
-    else if (schema !== 2) throw new Error(`Unsupported Intercom database schema ${schema}`);
+    if (schema === 0 || schema === 1 || schema === 2) this.atomic(() => {
+      this.db.exec(`
+        CREATE TABLE group_members (
+          session_id TEXT NOT NULL REFERENCES sessions(id), group_id TEXT NOT NULL REFERENCES groups(id),
+          PRIMARY KEY (session_id, group_id)
+        );
+        CREATE INDEX group_members_group ON group_members(group_id, session_id);
+        INSERT INTO group_members SELECT id, group_id FROM sessions;
+        CREATE INDEX messages_sender_group ON messages(from_id, group_id);
+        PRAGMA user_version = 3;
+      `);
+      let name = 'System';
+      let suffix = 1;
+      const exists = this.db.prepare('SELECT 1 FROM groups WHERE name = ?');
+      while (exists.get(name)) name = `System (${++suffix})`;
+      this.db.prepare('INSERT INTO groups VALUES (?, ?, 1)').run(systemGroupId, name);
+    });
+    else if (schema !== 3) throw new Error(`Unsupported Intercom database schema ${schema}`);
   }
 
   atomic<T>(work: () => T): T {
@@ -81,8 +106,9 @@ export class Store {
   }
 
   lookup(identity: NativeIdentity): StoredSession | undefined {
-    return this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE adapter_kind = ? AND host_id = ? AND native_id = ?`)
-      .get(identity.adapterKind, identity.hostInstanceId, identity.nativeSessionId) as StoredSession | undefined;
+    const row = this.db.prepare(`SELECT ${sessionColumns} FROM sessions s WHERE adapter_kind = ? AND host_id = ? AND native_id = ?`)
+      .get(identity.adapterKind, identity.hostInstanceId, identity.nativeSessionId);
+    return row && decodeSession(row);
   }
 
   bind(identity: NativeIdentity, current?: StoredSession): StoredSession {
@@ -92,21 +118,26 @@ export class Store {
     if (current) {
       const legacyName = `${adapterKind}-${nativeSessionId.slice(0, 8)}`;
       const existingName = current.name === legacyName ? generatedName : current.name;
-      this.db.prepare(`UPDATE groups SET version = version + 1
-        WHERE id = (SELECT group_id FROM sessions WHERE id = ? AND archived = 1)`).run(id);
+      this.db.prepare(`UPDATE groups SET version = version + 1 WHERE id IN (
+        SELECT group_id FROM group_members WHERE session_id = ? AND EXISTS (SELECT 1 FROM sessions WHERE id = ? AND archived = 1)
+        UNION SELECT ? WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ? AND archived = 1)
+      )`).run(id, id, systemGroupId, id);
       this.db.prepare('UPDATE sessions SET name = ?, cwd = ?, offline_since = NULL, archived = 0 WHERE id = ?')
         .run(name ?? existingName, cwd ?? current.cwd, id);
       return this.session(current.id)!;
     }
+    const groupId = adapterKind === 'service' ? systemGroupId : defaultGroupId;
     this.db.prepare(`INSERT INTO sessions(id, adapter_kind, host_id, native_id, name, cwd, group_id, membership_version)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`)
-      .run(id, adapterKind, hostInstanceId, nativeSessionId, name ?? generatedName, cwd ?? null, defaultGroupId);
-    this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?').run(defaultGroupId);
+      .run(id, adapterKind, hostInstanceId, nativeSessionId, name ?? generatedName, cwd ?? null, groupId);
+    this.db.prepare('INSERT INTO group_members VALUES (?, ?)').run(id, groupId);
+    this.db.prepare('UPDATE groups SET version = version + 1 WHERE id IN (?, ?)').run(groupId, systemGroupId);
     return this.session(id)!;
   }
 
   session(id: string): StoredSession | undefined {
-    return this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE id = ? AND archived = 0`).get(id) as StoredSession | undefined;
+    const row = this.db.prepare(`SELECT ${sessionColumns} FROM sessions s WHERE s.id = ? AND s.archived = 0`).get(id);
+    return row && decodeSession(row);
   }
 
   markOffline(now: number, sessionId?: string) {
@@ -118,35 +149,46 @@ export class Store {
   }
 
   archiveOffline(cutoff: number): boolean {
-    const expired = this.db.prepare(`UPDATE sessions SET archived = 1
-      WHERE archived = 0 AND offline_since <= ? RETURNING id, group_id AS groupId`).all(cutoff);
-    for (const session of expired) {
-      this.event('session', { sessionId: String(session.id), groupId: String(session.groupId), state: 'archived' });
+    const expired = this.db.prepare('UPDATE sessions SET archived = 1 WHERE archived = 0 AND offline_since <= ? RETURNING id').all(cutoff);
+    if (!expired.length) return false;
+    const groups = new Set([systemGroupId]);
+    const memberships = this.db.prepare('SELECT group_id FROM group_members WHERE session_id = ?');
+    for (const row of expired) {
+      const sessionId = String(row.id);
+      this.event('session', { sessionId, state: 'archived' });
+      for (const membership of memberships.all(sessionId)) groups.add(String(membership.group_id));
     }
     const updateGroup = this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?');
-    for (const id of new Set(expired.map(session => String(session.groupId)))) updateGroup.run(id);
-    return expired.length > 0;
+    for (const id of groups) updateGroup.run(id);
+    return true;
   }
 
   sessions(groupId?: string): StoredSession[] {
-    return (groupId === undefined
-      ? this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE archived = 0 ORDER BY name, id`).all()
-      : this.db.prepare(`SELECT ${sessionColumns} FROM sessions WHERE archived = 0 AND group_id = ? ORDER BY name, id`).all(groupId)) as StoredSession[];
+    const rows = groupId === undefined || groupId === systemGroupId
+      ? this.db.prepare(`SELECT ${sessionColumns} FROM sessions s WHERE s.archived = 0 ORDER BY s.name, s.id`).all()
+      : this.db.prepare(`SELECT ${sessionColumns} FROM group_members gm JOIN sessions s ON s.id = gm.session_id
+        WHERE gm.group_id = ? AND s.archived = 0 ORDER BY s.name, s.id`).all(groupId);
+    return rows.map(decodeSession);
+  }
+
+  groupInfo(id: string): Omit<Group, 'members'> {
+    const row = this.db.prepare('SELECT id, name, version FROM groups WHERE id = ?').get(id) as Omit<Group, 'members'> | undefined;
+    if (!row) throw new IntercomError('GROUP_NOT_FOUND', 'Group not found');
+    return row;
   }
 
   group(id: string, online: Online): Group {
-    const row = this.db.prepare('SELECT id, name, version FROM groups WHERE id = ?').get(id) as Omit<Group, 'members'> | undefined;
-    if (!row) throw new IntercomError('GROUP_NOT_FOUND', 'Group not found');
-    return { ...row, members: this.sessions(id).map(session => ({ ...session, online: online(session.id) })) };
+    return { ...this.groupInfo(id), members: this.sessions(id).map(session => ({ ...session, online: online(session.id) })) };
   }
 
   groups(online: Online): Group[] {
     return this.db.prepare('SELECT id FROM groups ORDER BY name, id').all().map(row => this.group(String(row.id), online));
   }
 
-  changeGroup(input: Parameters<'createGroup'> | Parameters<'moveGroup'>, online: Online, check: (id: string) => void): MoveResult {
+  changeGroup(operation: GroupChange, input: Parameters<GroupChange>, online: Online, check: (id: string, removed: string[]) => void): MoveResult {
     const create = 'name' in input;
-    return this.atomic(() => this.once('group', input.operationId, input, () => {
+    const scope = operation === 'createGroup' || operation === 'moveGroup' ? 'group' : operation;
+    const result = this.atomic(() => this.once(scope, input.operationId, input, () => {
       let groupId: string;
       if (create) {
         if (this.db.prepare('SELECT 1 FROM groups WHERE name = ?').get(input.name)) {
@@ -156,34 +198,63 @@ export class Store {
         this.db.prepare('INSERT INTO groups VALUES (?, ?, 1)').run(groupId, input.name);
       } else {
         groupId = input.groupId;
-        this.group(groupId, online);
+        if (groupId === systemGroupId) throw new IntercomError('SYSTEM_GROUP_READ_ONLY', 'System group membership is managed by Intercom');
+        this.groupInfo(groupId);
       }
-      const byId = input.sessionIds.map(id => {
+      const groupsChanged = new Set<string>();
+      const add = this.db.prepare('INSERT INTO group_members VALUES (?, ?)');
+      const remove = this.db.prepare('DELETE FROM group_members WHERE session_id = ? AND group_id = ?');
+      for (const id of input.sessionIds) {
         const session = this.session(id);
         if (!session) throw new IntercomError('SESSION_NOT_FOUND', 'Session not found', { sessionId: id });
+        if (session.adapterKind === 'service') throw new IntercomError('SYSTEM_GROUP_READ_ONLY', 'System services cannot join business groups');
         const expected = input.expectedMembershipVersions?.[id];
         if (expected !== undefined && expected !== session.membershipVersion) {
           throw new IntercomError('MEMBERSHIP_VERSION_CONFLICT', 'Session membership changed', { sessionId: id });
         }
-        if (session.groupId !== groupId) check(id);
-        return session;
-      });
-      const groupsChanged = new Set<string>();
-      for (const session of byId) {
-        if (session.groupId === groupId) continue;
-        groupsChanged.add(session.groupId);
-        groupsChanged.add(groupId);
-        this.db.prepare('UPDATE sessions SET group_id = ?, membership_version = membership_version + 1 WHERE id = ?')
-          .run(groupId, session.id);
-        this.event('session', { sessionId: session.id, groupId, state: 'moved' });
-        const queued = this.db.prepare(`SELECT d.id, d.message_id AS messageId FROM deliveries d JOIN messages m ON m.id = d.message_id
-          WHERE d.state = 'queued' AND (d.to_id = ? OR m.from_id = ?)`).all(session.id, session.id);
-        for (const row of queued) this.receipt(String(row.id), String(row.messageId), 'expired', 'daemon', 'Group membership changed');
+        let next: string[];
+        if (operation === 'moveGroup') next = [groupId];
+        else if (operation === 'removeGroupMembers') {
+          next = session.groupIds.filter(member => member !== groupId);
+          if (!next.length) next = [defaultGroupId];
+        } else next = [...new Set([...session.groupIds, groupId])];
+
+        const removed = session.groupIds.filter(member => !next.includes(member));
+        const added = next.filter(member => !session.groupIds.includes(member));
+        if (!removed.length && !added.length) continue;
+        if (removed.length) check(id, removed);
+        for (const member of removed) {
+          remove.run(id, member);
+          groupsChanged.add(member);
+          this.expireQueuedInGroup(id, member);
+        }
+        for (const member of added) {
+          add.run(id, member);
+          groupsChanged.add(member);
+        }
+        const primary = next.includes(session.groupId) ? session.groupId : next[0];
+        this.db.prepare('UPDATE sessions SET group_id = ?, membership_version = membership_version + 1 WHERE id = ?').run(primary, id);
+        this.event('session', { sessionId: id, groupId, state: 'membership_changed' });
       }
       for (const id of groupsChanged) this.db.prepare('UPDATE groups SET version = version + 1 WHERE id = ?').run(id);
       if (create || groupsChanged.size) this.event('group', { groupId, state: create ? 'created' : 'updated' });
-      return { group: this.group(groupId, online), sessions: byId.map(s => ({ ...this.session(s.id)!, online: online(s.id) })) };
+      return { group: this.group(groupId, online), sessions: input.sessionIds.map(id => ({ ...this.session(id)!, online: online(id) })) };
     }));
+    // Idempotent responses saved before multi-group support held only the primary group.
+    const withGroups = (session: Session) => ({ ...session, groupIds: session.groupIds ?? [session.groupId] });
+    return { group: { ...result.group, members: result.group.members.map(withGroups) }, sessions: result.sessions.map(withGroups) };
+  }
+
+  private expireQueuedInGroup(sessionId: string, groupId: string): void {
+    const rows = this.db.prepare(`SELECT d.id, d.message_id AS messageId FROM deliveries d JOIN messages m ON m.id = d.message_id
+      WHERE d.state = 'queued' AND m.group_id = ? AND (d.to_id = ? OR m.from_id = ?)`).all(groupId, sessionId, sessionId);
+    for (const row of rows) this.receipt(String(row.id), String(row.messageId), 'expired', 'daemon', 'Group membership changed');
+  }
+
+  contactedService(subscriberId: string, serviceId: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM messages m JOIN deliveries d ON d.message_id = m.id
+      WHERE m.from_id = ? AND m.group_id = ? AND m.kind IN ('send', 'ask') AND d.to_id = ? LIMIT 1`)
+      .get(subscriberId, systemGroupId, serviceId) !== undefined;
   }
 
   once<T>(scope: string, id: string | undefined, input: unknown, work: () => T): T {
@@ -220,12 +291,12 @@ export class Store {
     return { records: page.map(row => this.record(String(row.id))), nextBefore: rows.length > limit ? Number(page.at(-1)?.seq) : null };
   }
 
-  createMessage(from: StoredSession, text: string, kind: Message['kind'], replyTo: string | null, targets: { id: string; generation: string }[]): MessageRecord {
+  createMessage(from: StoredSession, groupId: string, text: string, kind: Message['kind'], replyTo: string | null, targets: { id: string; generation: string }[]): MessageRecord {
     const id = randomUUID();
     this.db.prepare(`INSERT INTO messages(id, group_id, from_id, from_name, text, kind, reply_to, created_at, ask_state)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, from.groupId, from.id, from.name, text, kind, replyTo, Date.now(), kind === 'ask' ? 'waiting' : null);
-    this.event('message', { messageId: id, groupId: from.groupId, sessionId: from.id, state: kind });
+      .run(id, groupId, from.id, from.name, text, kind, replyTo, Date.now(), kind === 'ask' ? 'waiting' : null);
+    this.event('message', { messageId: id, groupId, sessionId: from.id, state: kind });
     const insert = this.db.prepare(`INSERT INTO deliveries VALUES (?, ?, ?, ?, 'queued', 'daemon', NULL)`);
     for (const target of targets) {
       const deliveryId = randomUUID();

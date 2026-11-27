@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { IntercomError, formatIncoming, type IncomingDelivery, type NativeIdentity, type SessionSdk } from '../../sdk/index.js';
-import { createLocalControlSdk, openLocalSession } from '../../sdk/node.js';
+import { openLocalSession } from '../../sdk/node.js';
 import { registerIntercomTools, type OmpTool } from './tools.js';
 
 const statusKey = 'agent-intercom';
@@ -161,7 +161,7 @@ export default function intercomExtension(omp: OmpApi): void {
           const presence = await sdk.sessionStatus();
           if (!isCurrent(session)) return;
           if (!ctx.hasUI) {
-            ctx.ui.notify(`Intercom alias: ${presence.name} · group: ${presence.groupId} · ${presence.online ? 'online' : 'offline'} · ID: ${presence.id}`, 'info');
+            ctx.ui.notify(`Intercom alias: ${presence.name} · groups: ${(presence.groupIds ?? [presence.groupId]).join(', ')} · ${presence.online ? 'online' : 'offline'} · ID: ${presence.id}`, 'info');
             return;
           }
           const entered = await ctx.ui.input('Set Intercom alias', `Current alias: ${presence.name}`);
@@ -174,7 +174,7 @@ export default function intercomExtension(omp: OmpApi): void {
         }
         const presence = await sdk.rename({ name });
         if (isCurrent(session)) {
-          ctx.ui.notify(`Intercom alias: ${presence.name} · group: ${presence.groupId} · ${presence.online ? 'online' : 'offline'}`, 'info');
+          ctx.ui.notify(`Intercom alias: ${presence.name} · groups: ${(presence.groupIds ?? [presence.groupId]).join(', ')} · ${presence.online ? 'online' : 'offline'}`, 'info');
         }
       } catch (error) {
         ctx.ui.notify(errorText(error), 'error');
@@ -184,10 +184,7 @@ export default function intercomExtension(omp: OmpApi): void {
   omp.registerCommand('intercom-id', aliasCommand);
   omp.registerCommand('intercom-alias', aliasCommand);
 
-  registerIntercomTools(tool => omp.registerTool(tool), sessionSdk, ctx => {
-    sessionSdk(ctx);
-    return createLocalControlSdk();
-  });
+  registerIntercomTools(tool => omp.registerTool(tool), sessionSdk);
 }
 
 export type { OmpContext };

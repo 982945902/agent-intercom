@@ -2,13 +2,14 @@ import { z } from 'zod';
 
 export const protocolVersion = 1;
 export const defaultGroupId = 'default';
+export const systemGroupId = 'system';
 export const maxFrameBytes = 1024 * 1024;
 
 const id = z.string().trim().min(1).max(256);
 const label = z.string().trim().min(1).max(100);
 const text = z.string().min(1).max(64 * 1024).refine(value => value.trim().length > 0);
 export const identitySchema = z.object({
-  adapterKind: z.enum(['omp', 'agy', 'alma', 'codex']),
+  adapterKind: z.enum(['omp', 'agy', 'alma', 'codex', 'service']),
   hostInstanceId: id,
   nativeSessionId: id,
   name: label.optional(),
@@ -23,6 +24,7 @@ export interface Session {
   name: string;
   cwd: string | null;
   groupId: string;
+  groupIds: string[];
   membershipVersion: number;
   online: boolean;
 }
@@ -97,23 +99,27 @@ const membership = {
 };
 const none = z.object({});
 const page = { after: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(200).optional() };
+const groupChange = z.object({ groupId: id, ...membership, sessionIds: membership.sessionIds.min(1) });
 
 export const operations = {
   status: none,
   listSessions: z.object({ groupId: id.optional(), online: z.boolean().optional() }),
   listGroups: none,
   createGroup: z.object({ name: label, ...membership }),
-  moveGroup: z.object({ groupId: id, ...membership, sessionIds: membership.sessionIds.min(1) }),
+  moveGroup: groupChange,
+  addGroupMembers: groupChange,
+  removeGroupMembers: groupChange,
   listMessages: z.object({ groupId: id.optional(), before: z.number().int().positive().optional(), limit: page.limit }),
   getMessage: z.object({ messageId: id }),
   readEvents: z.object(page),
-  join: identitySchema.extend({ protocolVersion: z.number().int() }),
+  join: identitySchema.extend({ protocolVersion: z.number().int(), serviceToken: z.string().regex(/^[a-f0-9]{64}$/).optional() }),
   sessionStatus: none,
   rename: z.object({ name: label }),
   listPeers: none,
-  send: z.object({ to: id, text, clientRequestId: id.optional() }),
-  broadcast: z.object({ text, clientRequestId: id.optional() }),
-  ask: z.object({ to: id, text, timeoutMs: z.number().int().min(1).max(600000).default(300000) }),
+  myGroups: none,
+  send: z.object({ to: id, text, groupId: id.optional(), clientRequestId: id.optional() }),
+  broadcast: z.object({ text, groupId: id.optional(), clientRequestId: id.optional() }),
+  ask: z.object({ to: id, text, groupId: id.optional(), timeoutMs: z.number().int().min(1).max(600000).default(300000) }),
   reply: z.object({ replyTo: id, text, clientRequestId: id.optional() }),
   pending: none,
   receipt: z.object({
@@ -130,6 +136,8 @@ export interface Results {
   listGroups: Group[];
   createGroup: MoveResult;
   moveGroup: MoveResult;
+  addGroupMembers: MoveResult;
+  removeGroupMembers: MoveResult;
   listMessages: { records: MessageRecord[]; nextBefore: number | null };
   getMessage: MessageRecord;
   readEvents: EventsPage;
@@ -137,6 +145,7 @@ export interface Results {
   sessionStatus: Session;
   rename: Session;
   listPeers: Session[];
+  myGroups: Array<Omit<Group, 'members'>>;
   send: MessageRecord;
   broadcast: MessageRecord;
   ask: { request: Message; reply: Message };
@@ -146,7 +155,8 @@ export interface Results {
 }
 
 export const controlOperations = [
-  'status', 'listSessions', 'listGroups', 'createGroup', 'moveGroup', 'listMessages', 'getMessage', 'readEvents',
+  'status', 'listSessions', 'listGroups', 'createGroup', 'moveGroup', 'addGroupMembers', 'removeGroupMembers',
+  'listMessages', 'getMessage', 'readEvents',
 ] as const;
 export type ControlOperation = (typeof controlOperations)[number];
 export type Operation = keyof typeof operations;

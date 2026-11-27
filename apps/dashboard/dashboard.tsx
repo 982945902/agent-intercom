@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { IntercomError, type Session } from '../../packages/sdk/index.js';
+import { IntercomError, systemGroupId, type Session } from '../../packages/sdk/index.js';
 import { GroupActivity } from './activity.js';
 import { History } from './history.js';
 import { errorMessage, sdk, useLiveEvents, useResource } from './live.js';
@@ -8,7 +8,14 @@ import { cliNames, SessionIcon } from './session-icon.js';
 const selectionLimit = 100;
 const loadRoster = () => sdk.listGroups();
 
-type GroupAction = { name: string } | { groupId: string };
+const groupActionLabels = {
+  create: { title: 'New group', submit: 'Create group' },
+  add: { title: 'Add to group', submit: 'Add sessions' },
+  remove: { title: 'Remove from group', submit: 'Remove sessions' },
+};
+
+type GroupMode = keyof typeof groupActionLabels;
+type GroupAction = { mode: 'create'; name: string } | { mode: 'add' | 'remove'; groupId: string };
 
 interface GroupSubmission {
   key: string;
@@ -23,12 +30,13 @@ export function Dashboard() {
   const roster = useResource(loadRoster, live.rosterRevision);
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [destination, setDestination] = useState('');
-  const [groupDialog, setGroupDialog] = useState<'create' | 'move' | null>(null);
+  const [groupDialog, setGroupDialog] = useState<GroupMode | null>(null);
   const [groupName, setGroupName] = useState('');
   const [messageId, setMessageId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [groupError, setGroupError] = useState<string>();
   const [confirmation, setConfirmation] = useState<string>();
+  const rosterHeading = useRef<HTMLHeadingElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const lastSubmission = useRef<GroupSubmission | null>(null);
 
@@ -38,11 +46,18 @@ export function Dashboard() {
     members.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
     return new Map(members.map(session => [session.id, session]));
   }, [roster.data]);
-  const groupId = groupNames.has(filter.id) ? filter.id : undefined;
-  const visible = [...sessions.values()].filter(session => groupId === undefined || session.groupId === groupId);
+  const group = roster.data?.find(group => group.id === filter.id);
+  const groupId = group?.id;
+  const systemScope = group?.id === systemGroupId;
+  const visible = systemScope
+    ? group.members
+    : [...sessions.values()].filter(session => groupId === undefined || session.groupIds.includes(groupId));
+  const selectableVisible = systemScope ? [] : visible.filter(session => session.adapterKind !== 'service');
   const selectedIds = [...selection].filter(id => sessions.has(id));
-  const selectedVisible = visible.filter(session => selection.has(session.id)).length;
-  const allVisibleSelected = visible.length > 0 && selectedVisible === visible.length;
+  const selectedVisible = selectableVisible.filter(session => selection.has(session.id)).length;
+  const allVisibleSelected = selectableVisible.length > 0 && selectedVisible === selectableVisible.length;
+  const businessGroups = roster.data?.filter(group => group.id !== systemGroupId) ?? [];
+  const destinationExists = businessGroups.some(group => group.id === destination);
   const selectionFull = selectedIds.length === selectionLimit;
   const clearVisible = allVisibleSelected || (selectionFull && selectedVisible > 0);
   const online = visible.filter(session => session.online).length;
@@ -65,10 +80,10 @@ export function Dashboard() {
     setMessageId(null);
   }
 
-  function openGroupDialog(mode: 'create' | 'move') {
+  function openGroupDialog(mode: GroupMode) {
     setGroupError(undefined);
     setGroupName('');
-    setDestination('');
+    setDestination(mode === 'remove' ? groupId ?? '' : '');
     setGroupDialog(mode);
   }
 
@@ -84,7 +99,7 @@ export function Dashboard() {
   function toggleVisible() {
     setSelection(current => {
       const next = new Set(current);
-      for (const session of visible) {
+      for (const session of selectableVisible) {
         if (clearVisible) next.delete(session.id);
         else if (next.size < selectionLimit) next.add(session.id);
       }
@@ -108,7 +123,9 @@ export function Dashboard() {
       lastSubmission.current = submission;
       const { operationId, expectedMembershipVersions } = submission;
       const input = { sessionIds, operationId, expectedMembershipVersions };
-      const result = 'name' in action ? await sdk.createGroup({ ...action, ...input }) : await sdk.moveGroup({ ...action, ...input });
+      const result = action.mode === 'create' ? await sdk.createGroup({ ...input, name: action.name })
+        : action.mode === 'add' ? await sdk.addGroupMembers({ ...input, groupId: action.groupId })
+        : await sdk.removeGroupMembers({ ...input, groupId: action.groupId });
       lastSubmission.current = null;
       setSelection(current => {
         const next = new Set(current);
@@ -116,10 +133,11 @@ export function Dashboard() {
         return next;
       });
       dialog.current?.close();
-      if ('name' in action) {
+      if (action.mode === 'create') {
         setConfirmation(`Created ${result.group.name}${sessionIds.length ? ` with ${sessionIds.length} ${sessionIds.length === 1 ? 'session' : 'sessions'}` : ''}.`);
       } else {
-        setConfirmation(`Moved ${sessionIds.length} ${sessionIds.length === 1 ? 'session' : 'sessions'} to ${result.group.name}.`);
+        rosterHeading.current?.focus();
+        setConfirmation(`Saved membership in ${result.group.name}.`);
       }
       roster.refresh();
     } catch (error) {
@@ -133,11 +151,12 @@ export function Dashboard() {
 
   function submitGroup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (systemScope) return;
     if (groupDialog === 'create') {
       const name = groupName.trim();
-      if (name) void changeGroup({ name });
-    } else if (selectedIds.length && groupNames.has(destination)) {
-      void changeGroup({ groupId: destination });
+      if (name) void changeGroup({ mode: 'create', name });
+    } else if (groupDialog && selectedIds.length && destinationExists) {
+      void changeGroup({ mode: groupDialog, groupId: destination });
     }
   }
 
@@ -176,11 +195,12 @@ export function Dashboard() {
             {roster.data && <p className="scope-summary">
               {visible.length} {visible.length === 1 ? 'session' : 'sessions'}
               <span className="scope-online">{online} online</span>
+              {systemScope && <span>Read-only roster</span>}
             </p>}
           </div>
-          <button type="button" className="button primary" disabled={submitting || !roster.data} onClick={() => openGroupDialog('create')}>
+          {!systemScope && <button type="button" className="button primary" disabled={submitting || !roster.data} onClick={() => openGroupDialog('create')}>
             <span className="plus" aria-hidden="true">+</span> New group
-          </button>
+          </button>}
         </header>
         {live.streamError && (
           <div className="notice" role="alert">
@@ -199,16 +219,17 @@ export function Dashboard() {
         <div className="panels">
           <section className="panel" aria-labelledby="roster-heading">
             <header className="panel-heading">
-              <h2 id="roster-heading">Sessions</h2>
+              <h2 id="roster-heading" ref={rosterHeading} tabIndex={-1}>Sessions</h2>
             </header>
-            {selectedIds.length > 0 && (
+            {!systemScope && selectedIds.length > 0 && (
               <div className="roster-actions">
                 <div className="selection-summary" role="status">
                   <strong>{selectedIds.length} selected</strong>
                   {selectedVisible < selectedIds.length && <span>{selectedIds.length - selectedVisible} outside this group</span>}
                 </div>
                 <button type="button" className="text-button" disabled={submitting} onClick={() => setSelection(new Set())}>Clear</button>
-                <button type="button" className="button quiet" disabled={submitting} onClick={() => openGroupDialog('move')}>Move to group</button>
+                <button type="button" className="button quiet" disabled={submitting} onClick={() => openGroupDialog('add')}>{groupActionLabels.add.title}</button>
+                <button type="button" className="button quiet" disabled={submitting} onClick={() => openGroupDialog('remove')}>{groupActionLabels.remove.title}</button>
               </div>
             )}
             {confirmation && <p className="feedback success" role="status">{confirmation}</p>}
@@ -217,22 +238,22 @@ export function Dashboard() {
                 <table>
                   <thead>
                     <tr>
-                      <th scope="col">
-                        <label className="check-target">
+                      {!systemScope && <th scope="col" className="selection-cell">
+                        {selectableVisible.length > 0 && <label className="check-target">
                           <input type="checkbox" aria-label={clearVisible ? 'Deselect visible sessions' : `Select visible sessions, up to ${selectionLimit}`} checked={allVisibleSelected}
                             ref={node => { if (node) node.indeterminate = !allVisibleSelected && selectedVisible > 0; }}
                             disabled={submitting || (selectionFull && selectedVisible === 0)} onChange={toggleVisible} />
-                        </label>
-                      </th>
+                        </label>}
+                      </th>}
                       <th scope="col">Session</th>
-                      <th scope="col">Group</th>
+                      <th scope="col" className="groups-column">Groups</th>
                       <th scope="col">Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {visible.map(session => (
-                      <SessionRow key={session.id} session={session} groupName={groupNames.get(session.groupId)}
-                        selected={selection.has(session.id)} disabled={submitting || (!selection.has(session.id) && selectionFull)}
+                      <SessionRow key={session.id} session={session} groupNames={groupNames} showSelection={!systemScope}
+                        selected={!systemScope && selection.has(session.id)} disabled={submitting || (!selection.has(session.id) && selectionFull)}
                         onToggle={toggleSession} />
                     ))}
                   </tbody>
@@ -242,10 +263,10 @@ export function Dashboard() {
               <div className="empty-state">
                 <span className="empty-icon session-icon" aria-hidden="true" />
                 <p>{groupId ? 'No sessions in this group' : 'No sessions have joined'}</p>
-                <p>{groupId ? 'Select sessions in another group and move them here.' : 'Join Intercom from a coding session to see it here.'}</p>
+                {!systemScope && <p>{groupId ? 'Select sessions in another group and add them here.' : 'Join Intercom from a coding session to see it here.'}</p>}
               </div>
             ) : roster.loading && <p className="empty-state" role="status">Loading roster…</p>}
-            {selectedIds.length === selectionLimit && <p className="feedback">Selection limit reached ({selectionLimit} sessions).</p>}
+            {!systemScope && selectionFull && <p className="feedback">Selection limit reached ({selectionLimit} sessions).</p>}
           </section>
           <History key={groupId ?? ''} groupId={groupId} groupNames={groupNames} sessions={sessions}
             revision={live.messageRevision} messageId={messageId} onOpen={setMessageId} />
@@ -254,29 +275,35 @@ export function Dashboard() {
       <dialog ref={dialog} className="group-dialog" aria-labelledby="group-dialog-title"
         onClose={() => setGroupDialog(null)} onCancel={event => { if (submitting) event.preventDefault(); }}>
         {groupDialog && (
-          <form onSubmit={submitGroup}>
-            <h1 id="group-dialog-title">{groupDialog === 'create' ? 'New group' : 'Move to group'}</h1>
+          <form method="post" aria-labelledby="group-dialog-title" onSubmit={submitGroup}>
+            <h1 id="group-dialog-title">{groupActionLabels[groupDialog].title}</h1>
             {selectedIds.length > 0 && <p className="dialog-context">
-              {selectedIds.length} selected {selectedIds.length === 1 ? 'session' : 'sessions'} will move to {groupDialog === 'create' ? 'the new group' : 'the destination group'}.
+              {selectedIds.length} selected {selectedIds.length === 1 ? 'session' : 'sessions'}
+              {groupDialog === 'create' && ' will join this group and keep existing memberships.'}
             </p>}
+            {groupDialog === 'remove' && <p className="dialog-context">Sessions with no other groups return to Default.</p>}
             {groupDialog === 'create' ? (
-              <label className="field-label">Group name
-                <input autoFocus maxLength={100} required value={groupName} readOnly={submitting} onChange={event => setGroupName(event.target.value)} />
-              </label>
+              <div className="field-label">
+                <label htmlFor="group-name">Group name</label>
+                <input id="group-name" name="name" autoFocus maxLength={100} required pattern=".*\S.*" title="Enter a group name"
+                  value={groupName} readOnly={submitting} onChange={event => setGroupName(event.target.value)} />
+              </div>
             ) : (
-              <label className="field-label">Destination group
-                <select autoFocus required value={groupNames.has(destination) ? destination : ''} disabled={submitting} onChange={event => setDestination(event.target.value)}>
+              <div className="field-label">
+                <label htmlFor="group-destination">Group</label>
+                <select id="group-destination" name="groupId" autoFocus required value={destinationExists ? destination : ''}
+                  disabled={submitting} onChange={event => setDestination(event.target.value)}>
                   <option value="">Choose a group</option>
-                  {roster.data?.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
+                  {businessGroups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
                 </select>
-              </label>
+              </div>
             )}
             {groupError && <p className="feedback error" role="alert">{groupError}</p>}
             {submitting && <p className="dialog-context" role="status">Saving group membership…</p>}
             <div className="dialog-actions">
               <button type="button" className="button quiet" disabled={submitting} onClick={() => dialog.current?.close()}>Cancel</button>
-              <button type="submit" className="button primary" disabled={submitting || (groupDialog === 'create' ? !groupName.trim() : !selectedIds.length || !groupNames.has(destination))}>
-                {groupDialog === 'move' ? 'Move sessions' : selectedIds.length ? 'Create and move' : 'Create group'}
+              <button type="submit" className="button primary" disabled={submitting || (groupDialog !== 'create' && !selectedIds.length)}>
+                {groupDialog === 'create' && selectedIds.length ? 'Create and add' : groupActionLabels[groupDialog].submit}
               </button>
             </div>
           </form>
@@ -288,16 +315,19 @@ export function Dashboard() {
 
 interface SessionRowProps {
   session: Session;
-  groupName?: string;
+  groupNames: ReadonlyMap<string, string>;
+  showSelection: boolean;
   selected: boolean;
   disabled: boolean;
   onToggle: (id: string) => void;
 }
 
-function SessionRow({ session, groupName, selected, disabled, onToggle }: SessionRowProps) {
+function SessionRow({ session, groupNames, showSelection, selected, disabled, onToggle }: SessionRowProps) {
   return (
     <tr data-selected={selected}>
-      <td><label className="check-target"><input type="checkbox" aria-label={`Select ${session.name}`} checked={selected} disabled={disabled} onChange={() => onToggle(session.id)} /></label></td>
+      {showSelection && <td className="selection-cell">
+        {session.adapterKind !== 'service' && <label className="check-target"><input type="checkbox" aria-label={`Select ${session.name}`} checked={selected} disabled={disabled} onChange={() => onToggle(session.id)} /></label>}
+      </td>}
       <th scope="row">
         <div className="session-cell">
           <span className="terminal-mark"><SessionIcon kind={session.adapterKind} /></span>
@@ -310,7 +340,7 @@ function SessionRow({ session, groupName, selected, disabled, onToggle }: Sessio
           </div>
         </div>
       </th>
-      <td><span className="group-name" title={groupName ?? session.groupId}>{groupName ?? session.groupId}</span></td>
+      <td className="group-name">{session.groupIds.map(id => groupNames.get(id) ?? id).join(', ')}</td>
       <td><span className={`presence ${session.online ? 'online' : ''}`}>{session.online ? 'Online' : 'Offline'}</span></td>
     </tr>
   );

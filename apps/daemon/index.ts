@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createSocketServer } from 'node:net';
 import { join } from 'node:path';
@@ -76,11 +76,20 @@ async function main() {
   const socketPath = join(directory, 'daemon.sock');
   const endpointPath = join(directory, 'endpoint.json');
   const token = randomBytes(32).toString('hex');
+  const serviceTokenPath = join(directory, 'service-token');
+  try { writeFileSync(serviceTokenPath, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' }); }
+  catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+  }
+  const serviceToken = readFileSync(serviceTokenPath, 'utf8').trim();
+  if (!/^[a-f0-9]{64}$/.test(serviceToken)) throw new Error('Invalid system service credential file');
+  const serviceTokenBytes = Buffer.from(serviceToken, 'hex');
   const tokenBytes = Buffer.from(token);
   const dashboard = fileURLToPath(new URL('../../dashboard/', import.meta.url));
   const clients = new Set<{ flush(): void; close(): void }>();
   const store = new Store(join(directory, 'intercom.sqlite'));
-  const daemon = new Daemon(store, () => { for (const client of clients) client.flush(); });
+  const daemon = new Daemon(store, () => { for (const client of clients) client.flush(); }, value =>
+    value !== undefined && timingSafeEqual(serviceTokenBytes, Buffer.from(value, 'hex')));
   const offlineRetention = 24 * 60 * 60 * 1000;
   const sweepOffline = () => daemon.archiveOffline(Date.now() - offlineRetention);
   sweepOffline();
@@ -213,7 +222,7 @@ async function main() {
     if (!pathname.startsWith('/api/v1/')) { json(response, 404, { error: { code: 'UNSUPPORTED', message: 'Unsupported Intercom API version' } }); return; }
     let operation: ControlOperation;
     let input: unknown = {};
-    const groupId = path.match(/^\/groups\/([^/]+)\/members:move$/)?.[1];
+    const membership = path.match(/^\/groups\/([^/]+)\/members:(move|add|remove)$/);
     const messageId = path.match(/^\/messages\/([^/]+)$/)?.[1];
     if (method === 'GET' && path === '/status') operation = 'status';
     else if (method === 'GET' && path === '/groups') operation = 'listGroups';
@@ -224,10 +233,10 @@ async function main() {
     } else if (method === 'POST' && path === '/groups') {
       operation = 'createGroup';
       input = await readBody(request);
-    } else if (method === 'POST' && groupId) {
-      operation = 'moveGroup';
+    } else if (method === 'POST' && membership) {
+      operation = membership[2] === 'add' ? 'addGroupMembers' : membership[2] === 'remove' ? 'removeGroupMembers' : 'moveGroup';
       const body = await readBody(request);
-      input = { ...(body && typeof body === 'object' ? body : {}), groupId: decodeURIComponent(groupId) };
+      input = { ...(body && typeof body === 'object' ? body : {}), groupId: decodeURIComponent(membership[1]) };
     } else if (method === 'GET' && path === '/messages') {
       operation = 'listMessages';
       input = { groupId: searchParams.get('groupId') ?? undefined, before: queryInteger(searchParams, 'before'), limit: queryInteger(searchParams, 'limit') };

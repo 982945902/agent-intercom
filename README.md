@@ -36,13 +36,14 @@ The examples use `node dist/apps/cli/index.js` from this checkout. Use `npm link
 omp -e "$PWD/dist/packages/adapters/omp/index.js"
 ```
 
-The extension exposes `intercom_status`, `intercom_peers`, `intercom_send`, `intercom_ask`, `intercom_reply`, `intercom_pending`, `intercom_broadcast`, and group management tools. `intercom_ask` takes `{to, text, timeoutMs}`. `intercom_reply` takes `{replyTo, text}` with the exact incoming message ID.
+Use `intercom_groups` to list your groups and `intercom_peers` to list visible peers with their shared groups. The extension also exposes `intercom_status`, `intercom_send`, `intercom_ask`, `intercom_reply`, `intercom_pending`, and `intercom_broadcast`. Use `groupId` to choose a route where needed. `intercom_reply` takes `{replyTo, text}` with the exact incoming message ID.
 
 **AGY.** Add the [bundled Skill](packages/adapters/agy/skills/intercom/SKILL.md) to the active AGY skills directory. From the intended top-level conversation, ask AGY to run the following through `run_command`. Use an absolute path to the CLI if it is outside the current workspace or `intercom` is unavailable on `PATH`.
 
 ```sh
 intercom agy join agy-a --json
 intercom agy list --json
+intercom agy groups --json
 intercom agy ask omp-a 'Can you review the plan?' --timeout-ms 300000 --json
 intercom agy reply INCOMING_MESSAGE_ID 'Here is my reply.' --json
 ```
@@ -51,21 +52,35 @@ The bridge uses the conversation context supplied by `run_command`. It verifies 
 
 ## Manage live groups
 
-In the Dashboard, select sessions in the roster and choose **New group** or an existing destination. The roster and message history receive live updates. The CLI uses the same management API.
+Select sessions in the Dashboard to create a group or add or remove members. A session can belong to several groups at once. Creating a group and adding members preserve existing memberships. Use `group move` to replace all memberships with one group. The roster and message history update live.
 
 ```sh
 intercom sessions list --online --json
 intercom group create review SESSION_ID_A SESSION_ID_B --json
 intercom group list --json
+intercom group add GROUP_ID SESSION_ID_A SESSION_ID_B --json
+intercom group remove GROUP_ID SESSION_ID_A --json
 intercom group move GROUP_ID SESSION_ID_A SESSION_ID_B --json
 intercom messages list --group GROUP_ID --json
 ```
 
-A session first joins `default` and restores its last group when it reconnects. The daemon moves the selected sessions atomically without restarting their native conversations. It rejects moves involving an active ask and expires queued deliveries that can no longer be routed within their original group. Messages already admitted by a host can continue running.
+A session first joins `default` and restores all its groups when it reconnects. Removing its last group returns it to `default`. Membership changes apply atomically to the selected sessions without restarting their native conversations. Removing a group used by an active ask is rejected. Queued deliveries in a removed group expire. Messages already admitted by a host can continue running.
 
 The daemon checks every five minutes and on startup for sessions that have been offline for at least 24 hours. It removes them from the roster and topology while retaining their IDs, aliases, groups, and message history. Rejoining restores the session to the roster.
 
-The peer list, direct sends and broadcasts use the sender’s current group. Use full session IDs to disambiguate names. The Dashboard and management CLI can inspect all groups on the local daemon. Intercom trusts processes under the same local account, and group membership controls message routing within that account.
+Peer lists include the union of online sessions in your groups. Each peer appears once with only the memberships you share. Direct sends and asks require a shared group, inferred when there is exactly one. Choose `groupId` in OMP or `--group GROUP_ID` in AGY when you share multiple groups. Broadcasts always stay within one business group and need an explicit group when you belong to several. A reply uses the original ask’s group. Existing databases keep session IDs, memberships, aliases and message history during migration.
+
+## System services and JoyME Watch
+
+The read-only System group shows the local roster in Dashboard and management CLI. Authorized system services can discover all online sessions. Ordinary sessions can address a service directly without exposing unrelated business peers to each other. A service can notify a session by its stable ID after that session has contacted the service. These conversations use the System group for history and are independent of business membership changes.
+
+For JoyME Watch, build Intercom, start `intercom daemon start`, then set `channels["joyme-watch"].intercomEndpoint` in agent-autoloop’s `config.json` to the absolute path of `dist/packages/adapters/joyme-watch/endpoint.js`. Restart agent-autoloop with `agent-autoloop service install`. Both processes must use the same Intercom runtime directory. The adapter reads the daemon’s owner-only `service-token` file. Keep its contents out of agent prompts and logs.
+
+In OMP or AGY, send an ask to `joyme-watch` with a watch command such as `watch user ACCOUNT ttl=2h`. The watcher replies to the ask and later sends new-message and expiry notices to the subscribing session. Use a separate `channels["joyme-watch"].storeFile` for v2 if migrating from the older broker, and recreate existing subscriptions from the intended v2 sessions. Their subscriber IDs change between brokers.
+
+Session commands can manage the caller’s own watches. Global watcher maintenance stays outside the session interface.
+
+The management API and local runtime directory share the account’s trust boundary. System service credentials distinguish native service registration from ordinary session registration.
 
 ## Delivery and SDK
 

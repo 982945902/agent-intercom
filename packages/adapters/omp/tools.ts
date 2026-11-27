@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   operations, parseInput,
-  type ControlSdk, type Input, type Operation, type Results, type SessionSdk,
+  type Input, type Operation, type Results, type SessionSdk,
 } from '../../sdk/index.js';
 import type { OmpContext } from './index.js';
 
@@ -18,7 +18,6 @@ export interface OmpTool {
 export function registerIntercomTools(
   register: (tool: OmpTool) => void,
   sessionSdk: (ctx: OmpContext) => SessionSdk,
-  controlSdk: (ctx: OmpContext) => ControlSdk,
 ): void {
   function tool<K extends Operation>(
     operation: K,
@@ -40,24 +39,20 @@ export function registerIntercomTools(
     });
   }
 
-  tool('sessionStatus', 'status', 'Show this OMP session’s Intercom ID, alias, group, and presence.',
+  tool('sessionStatus', 'status', 'Show this OMP session’s Intercom ID, alias, groups, and presence.',
     ctx => sessionSdk(ctx).sessionStatus());
-  tool('listPeers', 'peers', 'List Intercom peers in this session’s current group. Use their session IDs for messaging.',
+  tool('listPeers', 'peers', 'List online peers, their shared groups, and available system services. Use peer IDs for messaging.',
     ctx => sessionSdk(ctx).listPeers());
-  tool('send', 'send', 'Send a message to an Intercom peer in your current group. Use the peer’s session ID as the recipient.',
+  tool('send', 'send', 'Send to a visible peer by ID. Specify groupId when you share more than one group.',
     (ctx, params) => sessionSdk(ctx).send(params));
-  tool('broadcast', 'broadcast', 'Send a message to the other Intercom peers in your current group.',
+  tool('broadcast', 'broadcast', 'Broadcast within one business group. Specify groupId if you belong to several.',
     (ctx, params) => sessionSdk(ctx).broadcast(params));
-  tool('ask', 'ask', 'Ask an Intercom peer in your current group and wait for a reply. Use the peer’s session ID as the recipient.',
+  tool('ask', 'ask', 'Ask a visible peer by ID and wait for a reply. Specify groupId when you share more than one group.',
     (ctx, params, signal) => sessionSdk(ctx).ask(params, signal));
   tool('reply', 'reply', 'Reply to an Intercom ask. Set replyTo to the explicit message ID of the ask.',
     (ctx, params) => sessionSdk(ctx).reply(params));
   tool('pending', 'pending', 'List incoming Intercom asks that are waiting for your reply.',
     ctx => sessionSdk(ctx).pending());
-  tool('listGroups', 'groups', 'List Intercom groups and their members with IDs and membership versions.',
-    ctx => controlSdk(ctx).listGroups());
-  tool('createGroup', 'create_group', 'Create an Intercom group and assign the specified session IDs to it.',
-    (ctx, params) => controlSdk(ctx).createGroup(params));
-  tool('moveGroup', 'move_group', 'Move the specified Intercom session IDs to an existing group.',
-    (ctx, params) => controlSdk(ctx).moveGroup(params));
+  tool('myGroups', 'groups', 'List the groups that this session belongs to.',
+    ctx => sessionSdk(ctx).myGroups());
 }

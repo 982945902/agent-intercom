@@ -5,9 +5,9 @@ import {
 import { openLocalSession, type LocalSession } from '../../sdk/node.js';
 import { isAgyHostGone, sendAgyMessage, verifyAgyConversation, type AgyContext } from './host.js';
 
-const agyCommands = ['join', 'list', 'status', 'send', 'ask', 'pending', 'reply', 'broadcast'] as const;
+const agyCommands = ['join', 'list', 'groups', 'status', 'send', 'ask', 'pending', 'reply', 'broadcast'] as const;
 export type AgyCommand = typeof agyCommands[number];
-export type AgyResult = Results['join' | 'listPeers' | 'sessionStatus' | 'send' | 'ask' | 'pending' | 'reply' | 'broadcast'];
+export type AgyResult = Results['join' | 'listPeers' | 'myGroups' | 'sessionStatus' | 'send' | 'ask' | 'pending' | 'reply' | 'broadcast'];
 
 export function isAgyCommand(command: unknown): command is AgyCommand {
   return typeof command === 'string' && agyCommands.some(candidate => candidate === command);
@@ -19,6 +19,7 @@ export function parseAgyInput(command: AgyCommand, input: unknown) {
       return input && typeof input === 'object' && 'name' in input && input.name !== undefined
         ? parseInput('rename', input) : {};
     case 'list': return parseInput('listPeers', input);
+    case 'groups': return parseInput('myGroups', input);
     case 'status': return parseInput('sessionStatus', input);
     case 'pending': return parseInput('pending', input);
     default: return parseInput(command, input);
@@ -136,6 +137,9 @@ export class AgySessions {
       case 'list':
         parseInput('listPeers', input);
         return sdk.listPeers();
+      case 'groups':
+        parseInput('myGroups', input);
+        return sdk.myGroups();
       case 'status':
         parseInput('sessionStatus', input);
         return sdk.sessionStatus();

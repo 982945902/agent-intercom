@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
-  IntercomError, parseInput, protocolVersion,
+  IntercomError, parseInput, protocolVersion, systemGroupId,
   type ControlOperation, type IncomingDelivery, type Message, type MessageRecord, type Operation,
   type Parameters, type Results, type Session,
 } from '../../packages/protocol/index.js';
-import { Store } from './store.js';
+import { Store, type StoredSession } from './store.js';
 
-type StoredSession = Omit<Session, 'online'>;
+type Target = { id: string; generation: string };
 type AskResult = Results['ask'];
 export interface PeerConnection {
   readonly generation: string;
@@ -16,6 +16,7 @@ export interface PeerConnection {
 interface WaitingAsk {
   senderId: string;
   targetId: string;
+  groupId: string;
   settle(reply?: Message, error?: IntercomError): void;
 }
 
@@ -23,7 +24,8 @@ export class Daemon {
   private readonly connections = new Map<string, PeerConnection>();
   private readonly asks = new Map<string, WaitingAsk>();
 
-  constructor(private readonly store: Store, private readonly notify: () => void) {
+  constructor(private readonly store: Store, private readonly notify: () => void,
+    private readonly authorizeService: (token: string | undefined) => boolean) {
     store.atomic(() => {
       store.disconnect();
       store.markOffline(Date.now());
@@ -40,7 +42,7 @@ export class Daemon {
     switch (operation) {
       case 'status':
         parseInput(operation, input);
-        return { protocolVersion, onlineSessions: this.connections.size, capabilities: ['sessions', 'groups', 'messages', 'events'] };
+        return { protocolVersion, onlineSessions: this.connections.size, capabilities: ['sessions', 'groups', 'multi-group', 'system-services', 'messages', 'events'] };
       case 'listSessions': {
         const filters = parseInput(operation, input);
         return this.store.sessions(filters.groupId).map(session => this.presence(session))
@@ -50,10 +52,12 @@ export class Daemon {
         parseInput(operation, input);
         return this.store.groups(this.online);
       case 'createGroup':
-      case 'moveGroup': {
-        const result = this.store.changeGroup(parseInput(operation, input), this.online, id => {
-          for (const ask of this.asks.values()) if (ask.senderId === id || ask.targetId === id) {
-            throw new IntercomError('ACTIVE_ASK', 'Session has a pending ask', { sessionId: id });
+      case 'moveGroup':
+      case 'addGroupMembers':
+      case 'removeGroupMembers': {
+        const result = this.store.changeGroup(operation, parseInput(operation, input), this.online, (id, removed) => {
+          for (const ask of this.asks.values()) if (removed.includes(ask.groupId) && (ask.senderId === id || ask.targetId === id)) {
+            throw new IntercomError('ACTIVE_ASK', 'Session has a pending ask in a group being removed', { sessionId: id });
           }
         });
         this.notify();
@@ -83,20 +87,41 @@ export class Daemon {
         this.notify();
         return this.presence({ ...sender, name });
       }
-      case 'listPeers':
+      case 'listPeers': {
         parseInput(operation, input);
-        return this.store.sessions(sender.groupId).filter(peer => peer.id !== sender.id && this.online(peer.id))
-          .map(peer => this.presence(peer));
+        const service = sender.adapterKind === 'service';
+        return this.store.sessions().flatMap(peer => {
+          if (peer.id === sender.id || !this.online(peer.id)) return [];
+          if (service || peer.adapterKind === 'service') return [this.presence(peer)];
+          const shared = this.sharedGroups(sender, peer);
+          return shared.length ? [{ ...this.presence(peer), groupIds: shared,
+            groupId: shared.includes(peer.groupId) ? peer.groupId : shared[0] }] : [];
+        });
+      }
+      case 'myGroups':
+        parseInput(operation, input);
+        return sender.groupIds.map(id => this.store.groupInfo(id));
       case 'send': {
         const args = parseInput(operation, input);
-        return this.message(sender, operation, args, () => [this.target(sender, args.to)]);
+        return this.message(sender, operation, args, () => {
+          const { groupId, target } = this.target(sender, args.to, args.groupId);
+          return { groupId, targets: [target] };
+        });
       }
       case 'broadcast': {
         const args = parseInput(operation, input);
-        return this.message(sender, operation, args, () => this.store.sessions(sender.groupId).flatMap(peer => {
-          const connection = this.connections.get(peer.id);
-          return connection && peer.id !== sender.id ? [{ id: peer.id, generation: connection.generation }] : [];
-        }));
+        return this.message(sender, operation, args, () => {
+          const groupId = args.groupId ?? (sender.groupIds.length === 1 ? sender.groupId : undefined);
+          if (!groupId) throw new IntercomError('GROUP_REQUIRED', 'Choose a group for this broadcast');
+          if (groupId === systemGroupId || !sender.groupIds.includes(groupId)) {
+            throw new IntercomError('CROSS_GROUP', 'Broadcasts require membership in a business group');
+          }
+          const targets = this.store.sessions(groupId).flatMap(peer => {
+            const connection = this.connections.get(peer.id);
+            return connection && peer.id !== sender.id ? [{ id: peer.id, generation: connection.generation }] : [];
+          });
+          return { groupId, targets };
+        });
       }
       case 'ask': return this.ask(sender, parseInput(operation, input), signal);
       case 'reply': return this.reply(sender, parseInput(operation, input));
@@ -129,6 +154,9 @@ export class Daemon {
     if (identity.protocolVersion !== protocolVersion) {
       throw new IntercomError('PROTOCOL_MISMATCH', `Daemon requires protocol ${protocolVersion}`);
     }
+    if (identity.adapterKind === 'service' && !this.authorizeService(identity.serviceToken)) {
+      throw new IntercomError('SERVICE_UNAUTHORIZED', 'A system service requires a valid service credential');
+    }
     const current = this.store.lookup(identity);
     if (connection.sessionId && connection.sessionId !== current?.id) {
       throw new IntercomError('SESSION_ALREADY_BOUND', 'Connection is bound to a different session');
@@ -147,27 +175,54 @@ export class Daemon {
     return this.presence(session);
   }
 
-  private target(sender: StoredSession, selector: string) {
+  private sharedGroups(sender: StoredSession, peer: StoredSession): string[] {
+    return sender.groupIds.filter(id => peer.groupIds.includes(id));
+  }
+
+  private routeGroups(sender: StoredSession, peer: StoredSession): string[] {
+    if (peer.adapterKind === 'service') return [systemGroupId];
+    if (sender.adapterKind === 'service') {
+      return this.store.contactedService(peer.id, sender.id) ? [systemGroupId] : [];
+    }
+    return this.sharedGroups(sender, peer);
+  }
+
+  private target(sender: StoredSession, selector: string, requestedGroup?: string) {
     const exact = this.store.session(selector);
-    const names = exact ? [] : this.store.sessions(sender.groupId).filter(peer => peer.id !== sender.id && peer.name === selector);
-    if (names.length > 1) throw new IntercomError('AMBIGUOUS_PEER', 'Multiple sessions share that name. Use a session ID.');
-    const target = exact ?? names[0];
-    if (!target) throw new IntercomError('PEER_NOT_FOUND', 'Peer not found in the current group');
-    if (target.id === sender.id) throw new IntercomError('SELF_TARGET', 'Cannot target your own Intercom session');
-    if (target.groupId !== sender.groupId) throw new IntercomError('CROSS_GROUP', 'Peer is outside the current group');
-    const connection = this.connections.get(target.id);
+    const peer = exact ?? this.targetByName(sender, selector, requestedGroup);
+    if (!peer) throw new IntercomError('PEER_NOT_FOUND', 'Peer not found in the visible groups');
+    if (peer.id === sender.id) throw new IntercomError('SELF_TARGET', 'Cannot target your own Intercom session');
+    const groups = this.routeGroups(sender, peer);
+    if (!groups.length || (requestedGroup !== undefined && !groups.includes(requestedGroup))) {
+      throw new IntercomError('CROSS_GROUP', 'Peer is outside the requested or shared groups');
+    }
+    const groupId = requestedGroup ?? (groups.length === 1 ? groups[0] : undefined);
+    if (!groupId) throw new IntercomError('GROUP_REQUIRED', 'Choose one of the shared groups', { groupIds: groups });
+    const connection = this.connections.get(peer.id);
     if (!connection) throw new IntercomError('PEER_OFFLINE', 'Peer is offline');
-    return { id: target.id, generation: connection.generation };
+    return { groupId, target: { id: peer.id, generation: connection.generation } };
+  }
+
+  private targetByName(sender: StoredSession, name: string, groupId?: string): StoredSession | undefined {
+    const matches = this.store.sessions().filter(peer => {
+      if (peer.id === sender.id || peer.name !== name) return false;
+      if (sender.adapterKind === 'service' && peer.adapterKind !== 'service') return false;
+      const groups = this.routeGroups(sender, peer);
+      return groupId === undefined ? groups.length > 0 : groups.includes(groupId);
+    });
+    if (matches.length > 1) throw new IntercomError('AMBIGUOUS_PEER', 'Multiple sessions share that name. Use a session ID.');
+    return matches[0];
   }
 
   private message(
     sender: StoredSession, kind: 'send' | 'broadcast', input: Parameters<'send'> | Parameters<'broadcast'>,
-    targets: () => { id: string; generation: string }[],
+    route: () => { groupId: string; targets: Target[] },
   ): MessageRecord {
     let created = false;
     const result = this.store.atomic(() => this.store.once(sender.id, input.clientRequestId, { kind, ...input }, () => {
       created = true;
-      return this.store.createMessage(sender, input.text, kind, null, targets());
+      const { groupId, targets } = route();
+      return this.store.createMessage(sender, groupId, input.text, kind, null, targets);
     }));
     if (created) this.dispatch(result);
     return result;
@@ -175,8 +230,8 @@ export class Daemon {
 
   private ask(sender: StoredSession, input: Parameters<'ask'>, signal: AbortSignal): Promise<AskResult> {
     if (signal.aborted) throw new IntercomError('CANCELLED', 'Intercom ask cancelled');
-    const target = this.target(sender, input.to);
-    const result = this.store.atomic(() => this.store.createMessage(sender, input.text, 'ask', null, [target]));
+    const { groupId, target } = this.target(sender, input.to, input.groupId);
+    const result = this.store.atomic(() => this.store.createMessage(sender, groupId, input.text, 'ask', null, [target]));
     const { message } = result;
     const deferred = Promise.withResolvers<AskResult>();
     const abort = () => settle(undefined, new IntercomError('CANCELLED', 'Intercom ask cancelled'));
@@ -190,7 +245,7 @@ export class Daemon {
       if (reply) deferred.resolve({ request: this.store.message(message.id)!, reply });
       else deferred.reject(error);
     };
-    this.asks.set(message.id, { senderId: sender.id, targetId: target.id, settle });
+    this.asks.set(message.id, { senderId: sender.id, targetId: target.id, groupId, settle });
     signal.addEventListener('abort', abort, { once: true });
     this.dispatch(result);
     return deferred.promise;
@@ -204,12 +259,11 @@ export class Daemon {
       if (original.message.kind !== 'ask' || !original.deliveries.some(delivery => delivery.toSessionId === sender.id)) {
         throw new IntercomError('INVALID_REPLY_TARGET', 'Only the recipient of an ask can reply');
       }
-      if (original.message.groupIdAtAccept !== sender.groupId) throw new IntercomError('CROSS_GROUP', 'Ask belongs to a different group');
       if (this.store.db.prepare('SELECT 1 FROM messages WHERE reply_to = ?').get(input.replyTo)) {
         throw new IntercomError('ALREADY_REPLIED', 'The ask already has a reply');
       }
-      const target = this.target(sender, original.message.fromSessionId);
-      const record = this.store.createMessage(sender, input.text, waiting ? 'reply' : 'late_reply', input.replyTo, [target]);
+      const { groupId, target } = this.target(sender, original.message.fromSessionId, original.message.groupIdAtAccept);
+      const record = this.store.createMessage(sender, groupId, input.text, waiting ? 'reply' : 'late_reply', input.replyTo, [target]);
       if (waiting) {
         this.store.finishAsk(input.replyTo, 'replied');
         for (const delivery of record.deliveries) {

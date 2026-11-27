@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { ensureBroker, IntercomClient } from '../dist/packages/adapters/joyme-watch/endpoint.js';
 import intercomExtension from '../dist/packages/adapters/omp/index.js';
 import { createLocalControlSdk, openLocalSession } from '../dist/packages/sdk/node.js';
 
@@ -80,15 +81,15 @@ test('routing, receipts, active asks, group moves and membership survive reconne
       assert.equal(initial.reset, true);
       const request = omp.sdk.ask({ to: second.id, text: 'confirm membership', timeoutMs: 5000 });
       const incoming = await eventually(() => inbox.find(message => message.kind === 'ask'));
-      await assert.rejects(control.createGroup({ name: 'blocked', sessionIds: [first.id, second.id] }), { code: 'ACTIVE_ASK' });
-      assert.equal((await control.listGroups()).length, 1);
+      const destination = await control.createGroup({ name: 'pair', sessionIds: [] });
+      await assert.rejects(control.moveGroup({ groupId: destination.group.id, sessionIds: [first.id, second.id] }), { code: 'ACTIVE_ASK' });
       assert.equal((await control.getMessage({ messageId: incoming.id })).deliveries[0].state, 'host_accepted');
       await agy.sdk.reply({ replyTo: incoming.id, text: 'confirmed' });
       assert.equal((await request).reply.text, 'confirmed');
 
       const { stdout } = await run(process.execPath, [cli, 'daemon', 'status', '--json'], { env: server.env });
       assert.match(stdout, /onlineSessions/);
-      const { group } = await control.createGroup({ name: 'pair', sessionIds: [first.id, second.id] });
+      const { group } = await control.moveGroup({ groupId: destination.group.id, sessionIds: [first.id, second.id] });
       const updated = await stream.next();
       assert.ok(updated.value.cursor > initial.cursor);
       assert.deepEqual((await omp.sdk.listPeers()).map(peer => peer.id), [second.id]);
@@ -120,6 +121,126 @@ test('routing, receipts, active asks, group moves and membership survive reconne
   }
 });
 
+test('coordination membership preserves business groups and restricts message routes', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp('/tmp/intercom-test-');
+  let server;
+  const connections = [];
+  try {
+    server = await startDaemon(directory);
+    const control = createLocalControlSdk(directory);
+    const inbox = [];
+    for (const name of ['leader-a', 'member-a', 'leader-b', 'member-b']) {
+      connections.push(await connect(directory, 'omp', name, inbox));
+    }
+    const [a, memberA, b, memberB] = connections.map(connection => connection.sdk);
+    const [aId, memberAId, bId, memberBId] = (await Promise.all(connections.map(c => c.sdk.sessionStatus()))).map(s => s.id);
+    const { group: groupA } = await control.createGroup({ name: 'Business A', sessionIds: [] });
+    const { group: groupB } = await control.createGroup({ name: 'Business B', sessionIds: [] });
+    await control.moveGroup({ groupId: groupA.id, sessionIds: [aId, memberAId] });
+    await control.moveGroup({ groupId: groupB.id, sessionIds: [bId, memberBId] });
+    const { group: coordination } = await control.createGroup({ name: 'Coordination', sessionIds: [aId, bId] });
+
+    assert.deepEqual(new Set((await a.myGroups()).map(group => group.id)), new Set([groupA.id, coordination.id]));
+    const visible = await a.listPeers();
+    assert.deepEqual(visible.map(peer => [peer.id, peer.groupIds]), [[bId, [coordination.id]], [memberAId, [groupA.id]]]);
+    assert.deepEqual((await memberA.listPeers()).map(peer => [peer.id, peer.groupIds]), [[aId, [groupA.id]]]);
+    await assert.rejects(memberA.send({ to: bId, text: 'No transitive visibility' }), { code: 'CROSS_GROUP' });
+    await assert.rejects(a.send({ to: bId, groupId: groupA.id, text: 'Wrong group' }), { code: 'CROSS_GROUP' });
+    await assert.rejects(a.broadcast({ text: 'Missing group' }), { code: 'GROUP_REQUIRED' });
+    const broadcast = await a.broadcast({ groupId: groupA.id, text: 'Only business A' });
+    assert.deepEqual(broadcast.deliveries.map(delivery => delivery.toSessionId), [memberAId]);
+
+    const request = a.ask({ to: bId, text: 'Coordinate', timeoutMs: 3000 });
+    void request.catch(() => {});
+    const incoming = await eventually(() => inbox.find(message => message.text === 'Coordinate'));
+    assert.equal(incoming.groupIdAtAccept, coordination.id);
+    await control.removeGroupMembers({ groupId: groupA.id, sessionIds: [aId] });
+    await assert.rejects(control.removeGroupMembers({ groupId: coordination.id, sessionIds: [aId] }), { code: 'ACTIVE_ASK' });
+    await b.reply({ replyTo: incoming.id, text: 'Coordinated' });
+    assert.equal((await request).reply.groupIdAtAccept, coordination.id);
+
+    const { stdout } = await run(process.execPath, [cli, 'group', 'add', groupA.id, aId, '--json'], { env: server.env });
+    assert.deepEqual(new Set(JSON.parse(stdout).result.sessions[0].groupIds), new Set([groupA.id, coordination.id]));
+    assert.deepEqual((await memberB.listPeers()).map(peer => peer.id), [bId]);
+    await control.addGroupMembers({ groupId: groupA.id, sessionIds: [bId] });
+    assert.equal((await a.listPeers()).filter(peer => peer.id === bId).length, 1);
+    await assert.rejects(a.send({ to: bId, text: 'Choose common group' }), { code: 'GROUP_REQUIRED' });
+    await a.send({ to: bId, groupId: coordination.id, text: 'Scoped direct' });
+    await server.close();
+    server = undefined;
+    server = await startDaemon(directory);
+    await eventually(async () => (await createLocalControlSdk(directory).status()).onlineSessions === 4);
+    assert.deepEqual(new Set((await a.sessionStatus()).groupIds), new Set([groupA.id, coordination.id]));
+    assert.equal((await a.sessionStatus()).id, aId);
+  } finally {
+    for (const connection of connections) connection.close();
+    await server?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('JoyME Watch can reply and notify its subscriber across group changes', { timeout: 10000 }, async () => {
+  const directory = await mkdtemp('/tmp/intercom-test-');
+  const previous = process.env.INTERCOM_RUNTIME_DIR;
+  process.env.INTERCOM_RUNTIME_DIR = directory;
+  const watcher = new IntercomClient();
+  const identity = { adapterKind: 'service', hostInstanceId: 'local', nativeSessionId: 'joyme-watch' };
+  const connections = [];
+  let server;
+  try {
+    server = await startDaemon(directory);
+    const control = createLocalControlSdk(directory);
+    await assert.rejects(openLocalSession(identity, async () => {}, { directory }), { code: 'SERVICE_UNAUTHORIZED' });
+    const inbox = [];
+    const subscriber = await connect(directory, 'omp', 'subscriber', inbox);
+    const unrelated = await connect(directory, 'agy', 'unrelated', []);
+    connections.push(subscriber, unrelated);
+    const subscriberId = (await subscriber.sdk.sessionStatus()).id;
+    const otherId = (await unrelated.sdk.sessionStatus()).id;
+    await ensureBroker();
+    await watcher.connect({ cwd: directory });
+    assert.deepEqual(new Set((await watcher.listSessions()).map(peer => peer.id)), new Set([subscriberId, otherId]));
+    const system = (await control.listGroups()).find(group => group.id === 'system');
+    assert.equal(system.members.length, 3);
+    await assert.rejects(control.addGroupMembers({ groupId: system.id, sessionIds: [subscriberId] }), { code: 'SYSTEM_GROUP_READ_ONLY' });
+    assert.equal((await watcher.send(otherId, { text: 'No subscription' })).delivered, false);
+    await assert.rejects(subscriber.sdk.broadcast({ groupId: system.id, text: 'No global broadcast' }), { code: 'CROSS_GROUP' });
+
+    const subscribed = once(watcher, 'message');
+    watcher.on('message', (_, message) => watcher.sendMessageReceipt({ messageId: message.id, status: 'acknowledged', timestamp: Date.now() }));
+    const request = subscriber.sdk.ask({ to: 'joyme-watch', text: 'watch user fixture', timeoutMs: 3000 });
+    void request.catch(() => {});
+    const [from, command] = await subscribed;
+    assert.equal(from.id, subscriberId);
+    assert.equal(command.expectsReply, true);
+    const { group } = await control.createGroup({ name: 'New work', sessionIds: [] });
+    await control.moveGroup({ groupId: group.id, sessionIds: [subscriberId] });
+    assert.equal((await watcher.send(from.id, { text: 'Subscribed', replyTo: command.id })).delivered, true);
+    assert.equal((await request).reply.text, 'Subscribed');
+    for (const text of ['list all', 'unwatch all global', JSON.stringify({ action: 'renew', watch_id: `${otherId}::user:fixture` })]) {
+      await assert.rejects(subscriber.sdk.ask({ to: 'joyme-watch', text, timeoutMs: 3000 }), { code: 'HOST_REJECTED' });
+    }
+    const notification = await watcher.send(from.id, { text: 'New JoyME message' });
+    assert.equal(notification.delivered, true);
+    assert.equal(inbox.find(message => message.id === notification.id).groupIdAtAccept, system.id);
+    subscriber.close();
+    await eventually(async () => (await control.listSessions({ online: false })).some(session => session.id === subscriberId));
+    assert.equal((await watcher.send(from.id, { text: 'Subscriber offline' })).delivered, false);
+    const disconnected = once(watcher, 'disconnected');
+    await server.close();
+    server = undefined;
+    await disconnected;
+    assert.equal(watcher.isConnected(), false);
+  } finally {
+    await watcher.disconnect();
+    for (const connection of connections) connection.close();
+    if (previous === undefined) delete process.env.INTERCOM_RUNTIME_DIR;
+    else process.env.INTERCOM_RUNTIME_DIR = previous;
+    await server?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('startup archives stale offline sessions and preserves history and resume identity', { timeout: 10000 }, async () => {
   const directory = await mkdtemp('/tmp/intercom-test-');
   let server;
@@ -132,6 +253,7 @@ test('startup archives stale offline sessions and preserves history and resume i
     connections.push(old, recent);
     const [stale, current] = await Promise.all(connections.map(connection => connection.sdk.sessionStatus()));
     const { group } = await control.createGroup({ name: 'retention', sessionIds: [stale.id, current.id] });
+    await control.moveGroup({ groupId: group.id, sessionIds: [stale.id, current.id] });
     const sent = await recent.sdk.send({ to: stale.id, text: 'Keep this history' });
     await old.sdk.rename({ name: 'saved-alias' });
     old.close();
@@ -142,7 +264,8 @@ test('startup archives stale offline sessions and preserves history and resume i
 
     const db = new DatabaseSync(join(directory, 'intercom.sqlite'));
     try {
-      db.exec('DROP INDEX sessions_offline; ALTER TABLE sessions DROP COLUMN archived; ALTER TABLE sessions DROP COLUMN offline_since; PRAGMA user_version = 1');
+      db.exec(`DROP TABLE group_members; DROP INDEX messages_sender_group; DELETE FROM groups WHERE id = 'system';
+        DROP INDEX sessions_offline; ALTER TABLE sessions DROP COLUMN archived; ALTER TABLE sessions DROP COLUMN offline_since; PRAGMA user_version = 1`);
       db.prepare(`UPDATE events SET timestamp = ? WHERE type = 'session' AND json_extract(payload, '$.sessionId') = ?
         AND json_extract(payload, '$.state') = 'offline'`).run(Date.now() - 25 * 60 * 60 * 1000, stale.id);
     } finally { db.close(); }
@@ -161,6 +284,7 @@ test('startup archives stale offline sessions and preserves history and resume i
     assert.equal(presence.id, stale.id);
     assert.equal(presence.name, 'saved-alias');
     assert.equal(presence.groupId, group.id);
+    assert.deepEqual(presence.groupIds, [group.id]);
     assert.deepEqual((await restarted.listSessions({ online: true })).map(session => session.id), [stale.id]);
   } finally {
     for (const connection of connections) connection.close();
